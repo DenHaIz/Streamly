@@ -31,6 +31,7 @@ export function normalizeSettings(s: Settings): Settings {
     nickname: sanitizeNickname(String(s.nickname ?? '')),
     deviceId: typeof s.deviceId === 'string' && /^[0-9a-f-]{36}$/.test(s.deviceId) ? s.deviceId : randomUUID(),
     autostart: bool(s.autostart, false),
+    closeToTray: bool(s.closeToTray, d.closeToTray),
     stream: {
       resolution: oneOf(st?.resolution, ['auto', '720', '1080', '1440', '4K'] as const, d.stream.resolution),
       fps: FPS_OPTIONS.includes(Number(st?.fps)) ? Number(st.fps) : d.stream.fps,
@@ -42,13 +43,16 @@ export function normalizeSettings(s: Settings): Settings {
       perfOverlay: bool(st?.perfOverlay, d.stream.perfOverlay),
       packetSize: st?.packetSize === 0 ? 0 : clampInt(st?.packetSize, 1024, 1500, 0),
       captureSystemKeys: oneOf(st?.captureSystemKeys, ['never', 'fullscreen', 'always'] as const, d.stream.captureSystemKeys),
-      audioOnHost: bool(st?.audioOnHost, d.stream.audioOnHost),
       absoluteMouse: bool(st?.absoluteMouse, d.stream.absoluteMouse)
     },
     host: {
       maxPlayers: clampInt(s.host?.maxPlayers, 1, 4, d.host.maxPlayers),
       defaultPerms: normalizePerms(s.host?.defaultPerms, d.host.defaultPerms),
-      useVirtualDisplay: bool(s.host?.useVirtualDisplay, d.host.useVirtualDisplay)
+      useVirtualDisplay: bool(s.host?.useVirtualDisplay, d.host.useVirtualDisplay),
+      maxBitrateKbps: s.host?.maxBitrateKbps === 0 ? 0 : clampInt(s.host?.maxBitrateKbps, 2000, 150000, d.host.maxBitrateKbps),
+      keepHostAudio: bool(s.host?.keepHostAudio, d.host.keepHostAudio),
+      notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
+      autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting)
     },
     recentHosts: Array.isArray(s.recentHosts)
       ? s.recentHosts
@@ -118,6 +122,12 @@ export class SecretsService {
 
   constructor(dir: string, cipher?: Cipher) {
     this.file = new JsonFile<Secrets>(join(dir, cipher ? 'secrets.bin' : 'secrets.json'), () => ({ friends: {}, hostTokens: {} }), cipher)
+    // Форма данных с диска не гарантирована: словари обязаны быть объектами.
+    const s = this.file.get()
+    const isDict = (v: unknown): boolean => !!v && typeof v === 'object' && !Array.isArray(v)
+    if (!isDict(s.friends) || !isDict(s.hostTokens)) {
+      this.file.set({ ...s, friends: isDict(s.friends) ? s.friends : {}, hostTokens: isDict(s.hostTokens) ? s.hostTokens : {} })
+    }
   }
 
   get(): Secrets {

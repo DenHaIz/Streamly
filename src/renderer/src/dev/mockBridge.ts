@@ -44,7 +44,7 @@ function scheduleRequests(): void {
   names.forEach((n, i) =>
     setTimeout(() => {
       if (host.phase !== 'running') return
-      setHost({ requests: [...host.requests, { id: `r${i}`, deviceId: `d${i}`, nickname: n, address: `26.33.${10 + i}.5`, at: Date.now() }] })
+      setHost({ requests: [...host.requests, { id: `r${i}`, deviceId: `d${i}`, nickname: n, address: `26.33.${10 + i}.5`, at: Date.now(), known: i % 2 === 0 }] })
     }, 1500 + i * 1200)
   )
 }
@@ -98,7 +98,10 @@ const bridge: StreamlyBridge = {
       setHost({ requests: host.requests.filter((x) => x.id !== id) })
       if (!r || d === 'deny') return
       setHost({
-        players: [...host.players, { deviceId: r.deviceId, nickname: r.nickname, address: r.address, status: 'pairing', perms: { ...settings.host.defaultPerms }, trusted: d === 'trust', since: Date.now() }]
+        players: [
+          ...host.players,
+          { deviceId: r.deviceId, nickname: r.nickname, address: r.address, status: 'pairing', perms: { ...settings.host.defaultPerms }, trusted: d === 'trust', since: Date.now(), rttMs: 18 + host.players.length * 37 }
+        ]
       })
       await wait(1500)
       setHost({ players: host.players.map((p) => (p.deviceId === r.deviceId ? { ...p, status: 'connecting' } : p)) })
@@ -110,6 +113,33 @@ const bridge: StreamlyBridge = {
     },
     async kick(id) {
       setHost({ players: host.players.filter((p) => p.deviceId !== id) })
+    },
+    async installGamepad() {
+      await wait(1500)
+      setHost({ gamepadDriver: true })
+      return { ok: true }
+    },
+    async kickAll() {
+      setHost({ players: [] })
+    },
+    async selfCheck() {
+      await wait(900)
+      return {
+        target: radmin.ip,
+        summary: 'hostWarnings',
+        items: [
+          { id: 'radmin', status: 'ok', value: radmin.ip },
+          { id: 'apolloInstalled', status: 'ok' },
+          { id: 'apolloService', status: 'ok' },
+          { id: 'sunshine', status: 'ok' },
+          { id: 'firewall', status: 'ok' },
+          { id: 'gamepadDriver', status: 'warn', hint: 'vigem' },
+          { id: 'apolloApi', status: 'ok' },
+          { id: 'apolloPorts', status: 'ok' },
+          { id: 'hosting', status: host.phase === 'running' ? 'ok' : 'warn', hint: 'hosting' },
+          { id: 'audio', status: 'ok' }
+        ]
+      }
     },
     listTrusted: async () => trusted,
     async removeTrusted(id) {
@@ -131,13 +161,36 @@ const bridge: StreamlyBridge = {
       emit('hosts', hosts)
     },
     getHosts: async () => hosts,
+    async diagnose(address) {
+      await wait(1500)
+      const bad = address.endsWith('.99')
+      return {
+        target: address,
+        summary: bad ? 'apolloBlocked' : 'allGood',
+        items: [
+          { id: 'radmin', status: 'ok', value: radmin.ip },
+          { id: 'radminAddress', status: 'ok', value: address },
+          { id: 'moonlight', status: 'ok' },
+          { id: 'ping', status: 'warn', hint: 'pingBlocked' },
+          { id: 'streamly', status: 'ok', value: '47900' },
+          bad ? { id: 'apollo', status: 'fail', hint: 'apolloFirewall', value: '47984, 47989, 48010' } : { id: 'apollo', status: 'ok', value: '47984, 47989, 48010' }
+        ]
+      }
+    },
     async connect(address) {
       const run = ++clientRun
       const name = hosts.find((h) => h.address === address)?.name ?? address
       const steps: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching']
       for (const phase of steps) {
         if (run !== clientRun) return
-        setClient({ phase, host: { address, name }, error: undefined, perms: settings.host.defaultPerms })
+        setClient({
+          phase,
+          host: { address, name },
+          error: undefined,
+          perms: settings.host.defaultPerms,
+          rttMs: 24,
+          policy: { hostAudio: true, maxBitrateKbps: 20000, hostWidth: 1920, hostHeight: 1080, hostFps: 60 }
+        })
         await wait(phase === 'waitingApproval' ? 2500 : 1300)
       }
       if (run !== clientRun) return

@@ -28,6 +28,9 @@ const bridge: StreamlyBridge = {
     respond: (id, d) => invoke(IPC.hostRespond, id, d),
     setPerms: (id, p) => invoke(IPC.hostSetPerms, id, p),
     kick: (id) => invoke(IPC.hostKick, id),
+    kickAll: () => invoke(IPC.hostKickAll),
+    installGamepad: () => invoke(IPC.hostInstallGamepad),
+    selfCheck: () => invoke(IPC.hostSelfCheck),
     listTrusted: () => invoke(IPC.hostListTrusted),
     removeTrusted: (id) => invoke(IPC.hostRemoveTrusted, id)
   },
@@ -36,6 +39,7 @@ const bridge: StreamlyBridge = {
     discover: () => invoke(IPC.clientDiscover),
     getHosts: () => invoke(IPC.clientGetHosts),
     connect: (address) => invoke(IPC.clientConnect, address),
+    diagnose: (address) => invoke(IPC.clientDiagnose, address),
     cancel: () => invoke(IPC.clientCancel),
     reset: () => invoke(IPC.clientReset)
   },

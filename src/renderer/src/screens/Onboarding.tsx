@@ -21,7 +21,7 @@ export function Onboarding() {
     if (busy) return
     setBusy(true)
     try {
-      await update({ nickname: nick, onboarded: true })
+      await update({ nickname: nick.trim(), onboarded: true })
       go('home')
     } finally {
       setBusy(false)

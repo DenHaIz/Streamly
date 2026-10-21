@@ -12,8 +12,14 @@ export interface Toast {
   action?: { label: string; run: () => void }
 }
 
+/** Что проверяем в окне диагностики: связь с хостом по адресу или сам этот ПК как хост. */
+export type DiagTarget = { mode: 'client'; address: string } | { mode: 'host' }
+
 interface AppStore {
   ready: boolean
+  diag: DiagTarget | null
+  openDiag(target: DiagTarget): void
+  closeDiag(): void
   screen: Screen
   /** Направление последнего перехода: для анимации «вперёд/назад». */
   direction: 1 | -1
@@ -47,6 +53,9 @@ export const useApp = create<AppStore>((set, get) => ({
   client: { phase: 'idle' },
   hosts: [],
   toasts: [],
+  diag: null,
+  openDiag: (target) => set({ diag: target }),
+  closeDiag: () => set({ diag: null }),
 
   async init() {
     const b = api()

@@ -2,6 +2,7 @@
 import type { InputPerms } from './perms'
 import type {
   AppInfo,
+  CheckReport,
   ClientState,
   DeepPartial,
   DiscoveredHost,
@@ -47,6 +48,12 @@ export interface StreamlyBridge {
     /** Только изменённые права: остальные остаются как есть. */
     setPerms(deviceId: string, perms: Partial<InputPerms>): Promise<void>
     kick(deviceId: string): Promise<void>
+    /** Установить драйвер геймпадов (ViGEmBus) через Apollo, одно окно UAC. */
+    installGamepad(): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
+    /** Отключить всех игроков. */
+    kickAll(): Promise<void>
+    /** Самопроверка хоста: Apollo, порты, файрвол, драйверы. */
+    selfCheck(): Promise<CheckReport>
     listTrusted(): Promise<TrustedFriendView[]>
     removeTrusted(deviceId: string): Promise<void>
   }
@@ -56,6 +63,8 @@ export interface StreamlyBridge {
     discover(): Promise<void>
     getHosts(): Promise<DiscoveredHost[]>
     connect(address: string): Promise<void>
+    /** Проверка связи с хостом по адресу: Radmin, ping, порты Streamly и Apollo. */
+    diagnose(address: string): Promise<CheckReport>
     cancel(): Promise<void>
     reset(): Promise<void>
   }
@@ -82,12 +91,16 @@ export const IPC = {
   hostRespond: 'host:respond',
   hostSetPerms: 'host:setPerms',
   hostKick: 'host:kick',
+  hostKickAll: 'host:kickAll',
+  hostInstallGamepad: 'host:installGamepad',
+  hostSelfCheck: 'host:selfCheck',
   hostListTrusted: 'host:listTrusted',
   hostRemoveTrusted: 'host:removeTrusted',
   clientGetState: 'client:getState',
   clientDiscover: 'client:discover',
   clientGetHosts: 'client:getHosts',
   clientConnect: 'client:connect',
+  clientDiagnose: 'client:diagnose',
   clientCancel: 'client:cancel',
   clientReset: 'client:reset'
 } as const

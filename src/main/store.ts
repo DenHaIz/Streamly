@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export interface Cipher {
@@ -37,11 +37,20 @@ export class JsonFile<T extends object> {
   }
 
   private load(): T {
+    if (!existsSync(this.path)) return this.defaults()
     try {
       const raw = readFileSync(this.path)
       const text = this.cipher ? this.cipher.decrypt(raw) : raw.toString('utf8')
-      return { ...this.defaults(), ...(JSON.parse(text) as Partial<T>) }
+      const parsed = JSON.parse(text) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+      return { ...this.defaults(), ...(parsed as Partial<T>) }
     } catch {
+      // Не удалось прочитать (повреждение, смена ключа DPAPI): сохраняем копию, чтобы данные можно было восстановить.
+      try {
+        renameSync(this.path, `${this.path}.corrupt-${Date.now()}`)
+      } catch {
+        /* не получилось переименовать — просто начинаем с чистого */
+      }
       return this.defaults()
     }
   }
@@ -51,7 +60,20 @@ export class JsonFile<T extends object> {
     const text = JSON.stringify(this.data, null, 2)
     const tmp = `${this.path}.tmp`
     writeFileSync(tmp, this.cipher ? this.cipher.encrypt(text) : text)
-    renameSync(tmp, this.path)
+    // Антивирус может ненадолго держать файл: несколько попыток переименования.
+    for (let i = 0; ; i++) {
+      try {
+        renameSync(tmp, this.path)
+        return
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (i >= 4 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw e
+        const until = Date.now() + 50 * (i + 1)
+        while (Date.now() < until) {
+          /* короткое ожидание: запись настроек синхронная */
+        }
+      }
+    }
   }
 }
 

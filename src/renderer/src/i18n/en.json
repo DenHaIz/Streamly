@@ -49,7 +49,11 @@
     "hostRunning": "You are hosting · players: {{count}}",
     "streaming": "Connected to {{name}}",
     "open": "Open",
-    "connectingTo": "Connecting to {{name}}…"
+    "connectingTo": "Connecting to {{name}}…",
+    "howTitle": "How to start",
+    "how1": "Everyone joins the same Radmin VPN network",
+    "how2": "One person presses \"I'm the host\"",
+    "how3": "Everyone else presses \"Connect\""
   },
   "host": {
     "title": "Host",
@@ -90,12 +94,29 @@
       "streaming": "watching"
     },
     "noGamepadDriver": "Virtual gamepad driver (ViGEmBus) not found: friends' gamepads will not work.",
-    "getDriver": "Get the driver",
+    "getDriver": "Download manually",
     "live": "Live",
     "joinToast": "{{name}} wants to join",
     "stoppedTitle": "Hosting is stopped",
     "stoppedText": "Press to start sharing your screen with friends again.",
-    "start": "Start"
+    "start": "Start",
+    "kickAll": "Disconnect all",
+    "invite": "Invite",
+    "inviteCopied": "Invite copied — send it to your friends",
+    "inviteText": "Join me in Streamly!\n1. Radmin VPN: join our shared network.\n2. Streamly: Connect → pick \"{{name}}\" or enter {{address}}.",
+    "selfCheck": "Check",
+    "upload": "Upload: up to {{mbps}} Mbps",
+    "uploadHint": "Each player gets their own stream. Make sure your internet upload speed is higher than this.",
+    "latency": "{{ms}} ms",
+    "padLimit": "Windows sees at most 4 Xbox gamepads on one PC (including the host's own). Turn off gamepad access for players who do not need it, or someone's pad will not show up in games.",
+    "installDriver": "Install driver",
+    "driverInstalled": "Gamepad driver installed",
+    "driverFailed": "Could not install the gamepad driver. Download ViGEmBus manually and restart the PC.",
+    "stopTitle": "Stop hosting?",
+    "kickAllTitle": "Disconnect everyone?",
+    "kickAllConfirm": "All players will be disconnected. Trusted friends can only come back after you accept them.",
+    "newDevice": "new device",
+    "newDeviceHint": "This device connects for the first time — make sure it is your friend"
   },
   "connect": {
     "title": "Connect",
@@ -126,7 +147,12 @@
     "again": "Connect again",
     "toHosts": "Back to hosts",
     "permGranted": "Host enabled: {{what}}",
-    "permRevoked": "Host disabled: {{what}}"
+    "permRevoked": "Host disabled: {{what}}",
+    "check": "Test connection",
+    "latency": "Latency {{ms}} ms",
+    "hostAudio": "Audio also plays on the host",
+    "bitrateCap": "Host cap: {{mbps}} Mbps",
+    "firewallHint": "If Windows asks to allow Moonlight, press Allow."
   },
   "errors": {
     "no_radmin": "Not connected to Radmin VPN",
@@ -149,7 +175,8 @@
     "host_not_hosting": "The host has not started hosting",
     "sunshine_conflict": "Sunshine is in the way",
     "pair_no_request": "Moonlight could not reach the host server",
-    "stream_timeout": "The stream did not start"
+    "stream_timeout": "The stream did not start",
+    "host_busy": "The host is temporarily busy"
   },
   "settings": {
     "title": "Settings",
@@ -186,7 +213,6 @@
     "perfOverlay": "Performance overlay",
     "absoluteMouse": "Desktop-style mouse",
     "absoluteMouseHint": "Turn off for games with a mouse-look camera",
-    "audioOnHost": "Keep audio on the host PC",
     "captureKeys": "Capture system keys (Win, Alt+Tab)",
     "captureModes": {
       "never": "Never",
@@ -211,7 +237,35 @@
     "notBundled": "missing",
     "installed": "installed",
     "notInstalled": "not installed",
-    "mbps": "{{value}} Mbps"
+    "mbps": "{{value}} Mbps",
+    "closeToTray": "Minimize to tray on close",
+    "closeToTrayHint": "While hosting or streaming, the close button hides the window to the tray instead of quitting",
+    "autoStartHosting": "Start hosting on launch",
+    "autoStartHostingHint": "Together with Windows autostart, friends can join as soon as the PC is on",
+    "quality": "Quality",
+    "presets": {
+      "economy": "Economy",
+      "balanced": "Balanced",
+      "high": "Maximum",
+      "custom": "Custom"
+    },
+    "presetsHint": {
+      "economy": "720p · 30 FPS · 5 Mbps — for slow internet or a Radmin relay",
+      "balanced": "Monitor resolution · 60 FPS · auto bitrate — fits most setups",
+      "high": "Monitor resolution · 60 FPS · 40 Mbps — for fast internet",
+      "custom": "Settings below were changed manually"
+    },
+    "maxBitrate": "Bitrate cap per player",
+    "maxBitrateHint": "Limits the host upload traffic. Applies the next time hosting starts",
+    "unlimited": "Unlimited",
+    "keepHostAudio": "Game audio stays on the host",
+    "keepHostAudioHint": "Needed for playing together: otherwise Apollo may redirect audio and the host will not hear it",
+    "notifyRequests": "Windows notifications about join requests",
+    "selfCheck": "Check host",
+    "selfCheckHint": "Apollo, ports, firewall, drivers — everything friends need to connect",
+    "advanced": "Advanced",
+    "bytes": "{{value}} B",
+    "notInstalledBundled": "not installed · bundled"
   },
   "errorHints": {
     "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
@@ -219,7 +273,7 @@
     "apollo_unreachable": "The Apollo service is not responding. Open Windows Services and check that \"Apollo Service\" is running, or restart the PC.",
     "apollo_auth": "Enter the login and password of the Apollo web panel (https://localhost:47990).",
     "install_cancelled": "Press Retry and choose Yes in the Windows prompt.",
-    "port_busy": "Port 47900 is busy: another copy of Streamly may be open. Close it and press Retry.",
+    "port_busy": "Port 47900 is busy: another copy of Streamly is open, or Windows reserved this port (Hyper-V/WSL). Close the extra copy; if that does not help, restart the PC.",
     "sunshine_conflict": "Sunshine is running and uses the same ports as Apollo. Stop \"Sunshine Service\" in Windows Services (or uninstall Sunshine) and press Retry.",
     "host_unreachable": "Make sure you and the host are in the same Radmin network and the host has a green dot in Radmin. If the connection goes through a relay, restart Radmin on both PCs.",
     "host_not_hosting": "The host PC is reachable, but Streamly is not in host mode there. Ask your friend to open Streamly and press \"I'm the host\".",
@@ -234,12 +288,70 @@
     "moonlight_missing": "Reinstall Streamly: Moonlight files are damaged or were removed by an antivirus.",
     "version_mismatch": "Install the same Streamly version as the host.",
     "connection_lost": "The connection to the host dropped. Check Radmin VPN and connect again.",
-    "unknown": "Copy the report and send it to whoever set up Streamly."
+    "unknown": "Copy the report and send it to whoever set up Streamly.",
+    "host_busy": "The streaming server on the host PC is restarting or busy. Wait a minute and connect again."
   },
   "diag": {
     "details": "Details",
     "copyReport": "Copy report",
     "reportCopied": "Report copied",
-    "openLogs": "Open logs"
+    "openLogs": "Open logs",
+    "title": "Connection test",
+    "hostTitle": "Host check",
+    "running": "Checking…",
+    "again": "Check again",
+    "checks": {
+      "radmin": "Radmin VPN on this PC",
+      "radminAddress": "Radmin network address",
+      "moonlight": "Moonlight client",
+      "ping": "Ping reply",
+      "streamly": "Streamly on the host (port 47900)",
+      "apollo": "Host streaming server",
+      "apolloInstalled": "Apollo installed",
+      "apolloService": "Apollo service running",
+      "sunshine": "No conflict with Sunshine",
+      "firewall": "Streamly firewall rule",
+      "gamepadDriver": "ViGEmBus gamepad driver",
+      "apolloApi": "Apollo responds",
+      "apolloPorts": "Apollo ports open",
+      "hosting": "Hosting is on",
+      "audio": "Audio stays on the host"
+    },
+    "hints": {
+      "radmin": "Start Radmin VPN and join the shared network.",
+      "notRadminAddress": "This is not a Radmin address (26.x.x.x). It only works inside one local network.",
+      "moonlight": "Reinstall Streamly: Moonlight is missing.",
+      "pingBlocked": "Ping does not get through. That is normal: Windows often blocks it in the firewall. See the next items.",
+      "highLatency": "High latency: Radmin probably routes you through a relay. Restart Radmin on both PCs or pick Economy in settings.",
+      "notHosting": "The host PC responds, but Streamly is not in host mode. Ask your friend to press \"I'm the host\".",
+      "streamlyFirewall": "The host PC responds, but the Streamly port is closed. The host needs to allow Streamly in the firewall or antivirus (or press \"I'm the host\" again — Streamly adds the rule).",
+      "noRoute": "The host PC does not respond at all. Check that it is on, you share a Radmin network and it has a green dot in Radmin.",
+      "apolloNotRunning": "The streaming server is not running on the host. Host: Services → \"Apollo Service\" → start, or restart the PC.",
+      "apolloFirewall": "The streaming server ports are closed. The host needs to allow Apollo in the firewall or antivirus.",
+      "apolloInstall": "Press \"I'm the host\" — Streamly will install Apollo.",
+      "apolloService": "Open Windows Services and start \"Apollo Service\", or press \"I'm the host\" — Streamly will try to start it.",
+      "sunshine": "Stop \"Sunshine Service\" or uninstall Sunshine: it uses the same ports.",
+      "firewall": "Press \"I'm the host\" — Streamly will add the firewall rule (asks for administrator rights).",
+      "vigem": "Without the ViGEmBus driver friends' gamepads will not work. Press \"Install driver\" on the host panel.",
+      "apolloApi": "Apollo does not respond on this PC. Restart \"Apollo Service\" or restart the PC.",
+      "apolloPorts": "Apollo does not listen on the required ports. Another program may use them (Sunshine, Parsec, etc.).",
+      "hosting": "Hosting is off — friends cannot connect.",
+      "hostAudio": "The host will not hear the game. Turn on \"Game audio stays on the host\" in settings."
+    },
+    "summary": {
+      "allGood": "Connection is fine — you can connect",
+      "noRadmin": "Connect to Radmin VPN first",
+      "noRoute": "No connection to the host PC over Radmin",
+      "notHosting": "The host has not pressed \"I'm the host\" yet",
+      "streamlyBlocked": "The host firewall blocks Streamly",
+      "apolloBlocked": "The host firewall blocks the streaming server",
+      "moonlightMissing": "Moonlight is missing — reinstall Streamly",
+      "slow": "Connected, but slow",
+      "badAddress": "Invalid address",
+      "hostOk": "The host is ready for friends",
+      "hostWarnings": "The host works, but there are warnings",
+      "hostProblems": "There are problems, friends cannot connect",
+      "checkFailed": "The check did not run — please try again"
+    }
   }
 }

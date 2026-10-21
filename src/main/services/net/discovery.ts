@@ -82,7 +82,12 @@ export function probeHosts(opts: {
   return new Promise((resolve) => {
     const results = new Map<string, ProbeResult>()
     const s = createSocket('udp4')
+    let closed = false
+    const timers: NodeJS.Timeout[] = []
     const finish = (): void => {
+      if (closed) return
+      closed = true
+      timers.forEach(clearTimeout)
       try {
         s.close()
       } catch {
@@ -100,7 +105,14 @@ export function probeHosts(opts: {
     })
     s.bind(0, opts.localIp, () => {
       const payload = Buffer.from(DISCOVERY_MAGIC)
-      const send = (ip: string): void => s.send(payload, port, ip, () => undefined)
+      const send = (ip: string): void => {
+        if (closed) return
+        try {
+          s.send(payload, port, ip, () => undefined)
+        } catch {
+          /* сокет закрылся между проверкой и отправкой */
+        }
+      }
       if (opts.broadcast) {
         s.setBroadcast(true)
         send(RADMIN_BROADCAST)
@@ -108,11 +120,13 @@ export function probeHosts(opts: {
       }
       for (const ip of new Set(opts.targets)) send(ip)
       // Повтор на случай потери первого пакета.
-      setTimeout(() => {
-        if (opts.broadcast) send(RADMIN_BROADCAST)
-        for (const ip of new Set(opts.targets)) send(ip)
-      }, 600)
-      setTimeout(finish, opts.windowMs ?? 2500)
+      timers.push(
+        setTimeout(() => {
+          if (opts.broadcast) send(RADMIN_BROADCAST)
+          for (const ip of new Set(opts.targets)) send(ip)
+        }, 600),
+        setTimeout(finish, opts.windowMs ?? 2500)
+      )
     })
   })
 }

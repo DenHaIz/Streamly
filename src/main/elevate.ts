@@ -56,6 +56,7 @@ export async function runElevatedScript(
   try {
     const res = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encode(outer)], timeoutMs)
     if (res.code === UAC_CANCELLED) return { ok: false, cancelled: true }
+    if (res.code === 3) return { ok: false, error: 'result path is a reparse point' }
     try {
       const text = readFileSync(resultPath, 'utf8').replace(/^﻿/, '')
       return JSON.parse(text) as ElevatedResult

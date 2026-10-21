@@ -1,5 +1,6 @@
 // Протокол Streamly между клиентом и хостом: JSON-сообщения поверх WebSocket.
 import type { InputPerms } from './perms'
+import type { StreamPolicy } from './types'
 
 export const PROTOCOL_VERSION = 1
 export const SIGNALING_PORT = 47900
@@ -18,12 +19,13 @@ export type ClientMessage =
   | { t: 'launchRequest' }
   | { t: 'sessionStarted' }
   | { t: 'sessionEnded' }
-  | { t: 'ping' }
+  /** ts — время отправки у клиента, хост возвращает его в pong для замера задержки. */
+  | { t: 'ping'; ts?: number }
 
 export type HostMessage =
   | { t: 'hostInfo'; v: number; hostName: string; slotsUsed: number; maxSlots: number }
   /** needsPair: хост не знает этого клиента в Apollo, нужно сопряжение (хост — источник истины). */
-  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean }
+  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean; policy: StreamPolicy }
   | { t: 'joinDenied'; reason: 'denied' | 'full' | 'version' | 'busy' }
   | { t: 'pairBegin'; pin: string }
   /** Очередь дошла: можно запускать Moonlight. */
@@ -38,7 +40,7 @@ export type HostMessage =
   | { t: 'permissionsChanged'; perms: InputPerms }
   | { t: 'kicked' }
   | { t: 'hostStopping' }
-  | { t: 'pong' }
+  | { t: 'pong'; ts?: number }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -96,10 +98,50 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
   return m as unknown as ClientMessage
 }
 
+const int = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max
+const isPerms = (v: unknown): v is InputPerms =>
+  !!v && typeof v === 'object' && ['keyboard', 'mouse', 'gamepad'].every((k) => typeof (v as Record<string, unknown>)[k] === 'boolean')
+const isPolicy = (v: unknown): v is StreamPolicy => {
+  if (!v || typeof v !== 'object') return false
+  const p = v as Record<string, unknown>
+  return (
+    typeof p.hostAudio === 'boolean' &&
+    int(p.maxBitrateKbps, 0, 500_000) &&
+    int(p.hostWidth, 0, 16_384) &&
+    int(p.hostHeight, 0, 16_384) &&
+    int(p.hostFps, 0, 1000)
+  )
+}
+
+/** Разбирает и проверяет сообщение от хоста: числа в разумных пределах, строки ограниченной длины. */
 export function parseHostMessage(raw: unknown): HostMessage | null {
   const m = parse(raw, HOST_TYPES)
   if (!m) return null
-  if (m.t === 'pairBegin' && !(typeof m.pin === 'string' && /^\d{4}$/.test(m.pin))) return null
+  switch (m.t) {
+    case 'pairBegin':
+      if (!(typeof m.pin === 'string' && /^\d{4}$/.test(m.pin))) return null
+      break
+    case 'hostInfo':
+      if (typeof m.v !== 'number' || !str(m.hostName, 64) || !int(m.slotsUsed, 0, 64) || !int(m.maxSlots, 0, 64)) return null
+      m.hostName = sanitizeNickname(m.hostName as string)
+      break
+    case 'joinAccepted':
+      if (!isPerms(m.perms) || !isPolicy(m.policy) || typeof m.needsPair !== 'boolean') return null
+      if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
+      break
+    case 'permissionsChanged':
+      if (!isPerms(m.perms)) return null
+      break
+    case 'joinDenied':
+      if (!['denied', 'full', 'version', 'busy'].includes(m.reason as string)) return null
+      break
+    case 'pairResult':
+      if (typeof m.ok !== 'boolean') return null
+      break
+    case 'sessionState':
+      if (typeof m.streaming !== 'boolean') return null
+      break
+  }
   return m as unknown as HostMessage
 }
 

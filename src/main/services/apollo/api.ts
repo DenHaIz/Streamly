@@ -103,7 +103,7 @@ export class ApolloApi {
       { currentUsername: '', currentPassword: '', newUsername: c.username, newPassword: c.password, confirmNewPassword: c.password },
       false
     )
-    if (res.status !== 200) throw new ApolloError('http', `password: ${res.status} ${res.body}`, res.status)
+    if (res.status !== 200) throw new ApolloError('http', `password: ${res.status} ${res.body.slice(0, 200)}`, res.status)
     this.cookie = null
   }
 
@@ -147,7 +147,7 @@ export class ApolloApi {
     }
     if (res.status === 307) throw new ApolloError('needsSetup', 'credentials not set')
     if (res.status === 401) throw new ApolloError('auth', 'unauthorized', 401)
-    if (res.status < 200 || res.status >= 300) throw new ApolloError('http', `${path}: ${res.status} ${res.body}`, res.status)
+    if (res.status < 200 || res.status >= 300) throw new ApolloError('http', `${path}: ${res.status} ${res.body.slice(0, 200)}`, res.status)
     if (!res.body) return {} as T
     try {
       return JSON.parse(res.body) as T

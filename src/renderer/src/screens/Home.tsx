@@ -89,6 +89,15 @@ export function Home() {
         <BigAction tone="violet" icon={hosting ? <Radio size={30} /> : <Cast size={30} />} title={t('home.hostTitle')} text={t('home.hostText')} onClick={() => go('host')} />
         <BigAction tone="cyan" icon={<Users size={30} />} title={t('home.connectTitle')} text={t('home.connectText')} onClick={() => go('connect')} />
       </motion.div>
+
+      <motion.div className="how" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ...softSpring, delay: 0.25 }} aria-label={t('home.howTitle')}>
+        {[t('home.how1'), t('home.how2'), t('home.how3')].map((text, i) => (
+          <div key={i} className="how-step card">
+            <span className="how-num">{i + 1}</span>
+            {text}
+          </div>
+        ))}
+      </motion.div>
     </div>
   )
 }

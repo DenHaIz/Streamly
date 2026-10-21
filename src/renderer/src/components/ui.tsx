@@ -1,5 +1,8 @@
 import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion'
-import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from 'react'
+
+/** Заголовок строки настроек: переключатели и списки внутри берут его как подпись для экранного диктора. */
+const RowLabel = createContext<string | undefined>(undefined)
 
 export const spring = { type: 'spring', stiffness: 520, damping: 34, mass: 0.8 } as const
 export const softSpring = { type: 'spring', stiffness: 260, damping: 28 } as const
@@ -45,12 +48,13 @@ export function IconButton({ label, children, ...rest }: HTMLMotionProps<'button
 }
 
 export function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string }) {
+  const rowLabel = useContext(RowLabel)
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label={label}
+      aria-label={label ?? rowLabel}
       disabled={disabled}
       className={`switch ${checked ? 'on' : ''}`}
       onClick={() => onChange(!checked)}
@@ -91,9 +95,11 @@ export function Select<T extends string | number>({
   options: { value: T; label: string }[]
   onChange: (v: T) => void
 }) {
+  const rowLabel = useContext(RowLabel)
   return (
     <select
       className="select"
+      aria-label={rowLabel}
       value={String(value)}
       onChange={(e) => {
         const opt = options.find((o) => String(o.value) === e.target.value)
@@ -116,7 +122,7 @@ export function Row({ title, hint, children }: { title: ReactNode; hint?: ReactN
         <div className="row-title">{title}</div>
         {hint && <div className="row-hint">{hint}</div>}
       </div>
-      {children}
+      <RowLabel.Provider value={typeof title === 'string' ? title : undefined}>{children}</RowLabel.Provider>
     </div>
   )
 }
@@ -156,7 +162,23 @@ export function Modal({ open, onClose, children }: { open: boolean; onClose: () 
     if (!open) return
     const prev = document.activeElement as HTMLElement | null
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') closeRef.current()
+      if (e.key === 'Escape') return closeRef.current()
+      // Tab не уходит за пределы окна на страницу под затемнением.
+      if (e.key !== 'Tab' || !ref.current) return
+      const items = [...ref.current.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, [tabindex]:not([tabindex="-1"])')]
+      if (!items.length) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      } else if (!ref.current.contains(document.activeElement)) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>('button, input, [tabindex]')?.focus())

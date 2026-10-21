@@ -9,8 +9,11 @@ import {
   Mouse,
   Power,
   RotateCw,
+  Send,
   Server,
   ShieldCheck,
+  Stethoscope,
+  Upload,
   TriangleAlert,
   UserMinus,
   Radio,
@@ -18,7 +21,7 @@ import {
   Users,
   X
 } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode, type Ref } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
 import type { HostState, JoinRequestView, PlayerView } from '@shared/types'
@@ -42,14 +45,16 @@ export function Host() {
     setStarting(true)
     void api()
       .host.start()
+      .catch(() => useApp.getState().toast({ tone: 'danger', text: t('errors.unknown') }))
       .finally(() => setStarting(false))
   }
 
   // Заходя на экран (или когда появилась сеть Radmin), сразу запускаем хост: пользователь уже нажал «Я хост».
   // Только при входе: после «Остановить» экран не должен перезапускать хост сам.
   useEffect(() => {
-    const phase = useApp.getState().host?.phase
-    if (radmin.connected && (!phase || phase === 'idle')) start()
+    const h = useApp.getState().host
+    const waitingForRadmin = h?.phase === 'error' && h.error === 'no_radmin'
+    if (radmin.connected && (!h || h.phase === 'idle' || waitingForRadmin)) start()
   }, [radmin.connected])
 
   let body: ReactNode
@@ -139,7 +144,19 @@ function SetupProgress({ phase }: { phase: HostState['phase'] }) {
           )
         })}
       </div>
-      {phase === 'installing' && <p className="muted" style={{ marginBottom: 0 }}>{t('host.installHint')}</p>}
+      {phase === 'installing' && <p className="muted">{t('host.installHint')}</p>}
+      {phase !== 'installing' && (
+        <Button
+          variant="ghost"
+          icon={<X size={16} />}
+          onClick={() => {
+            useApp.getState().go('home')
+            void api().host.stop()
+          }}
+        >
+          {t('common.cancel')}
+        </Button>
+      )}
     </motion.div>
   )
 }
@@ -197,12 +214,14 @@ function Credentials() {
       <h2 className="card-title">{t('host.credentialsTitle')}</h2>
       <p className="muted">{t('host.credentialsText')}</p>
       <div style={{ display: 'grid', gap: 12, textAlign: 'left', margin: '6px 0 18px' }}>
-        <input className={`input ${bad ? 'invalid' : ''}`} placeholder={t('host.username')} value={user} onChange={(e) => setUser(e.target.value)} autoFocus />
+        <input className={`input ${bad ? 'invalid' : ''}`} placeholder={t('host.username')} aria-label={t('host.username')} autoComplete="username" value={user} onChange={(e) => setUser(e.target.value)} autoFocus />
         <motion.input
           key={attempt}
           className={`input ${bad ? 'invalid' : ''}`}
           type="password"
           placeholder={t('host.password')}
+          aria-label={t('host.password')}
+          autoComplete="current-password"
           value={pass}
           onChange={(e) => setPass(e.target.value)}
           animate={bad ? { x: [0, -8, 8, -5, 5, 0] } : { x: 0 }}
@@ -270,7 +289,15 @@ function Dashboard({ host }: { host: HostState }) {
   const { t } = useTranslation()
   const go = useApp((s) => s.go)
   const [confirmStop, setConfirmStop] = useState(false)
+  const [confirmKickAll, setConfirmKickAll] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const capKbps = useApp((s) => s.settings?.host.maxBitrateKbps ?? 0)
+  const toast = useApp((s) => s.toast)
+  // Готовый текст-приглашение: что сделать другу, чтобы подключиться.
+  const invite = (): void => {
+    void api().copyText(t('host.inviteText', { name: host.hostName, address: host.address ?? '' }))
+    toast({ tone: 'success', text: t('host.inviteCopied') }, 3500)
+  }
   const stop = (): void => {
     if (stopping) return
     setStopping(true)
@@ -288,9 +315,22 @@ function Dashboard({ host }: { host: HostState }) {
           {t('host.live')}
         </span>
         <div className="spacer" />
-        <Button variant="danger" icon={<Power size={16} />} loading={stopping} onClick={() => (host.players.length ? setConfirmStop(true) : stop())}>
-          {t('host.stop')}
-        </Button>
+        <div className="host-actions">
+          <Button variant="ghost" icon={<Stethoscope size={16} />} title={t('host.selfCheck')} aria-label={t('host.selfCheck')} onClick={() => useApp.getState().openDiag({ mode: 'host' })}>
+            <span className="btn-label collapsible">{t('host.selfCheck')}</span>
+          </Button>
+          <Button icon={<Send size={16} />} title={t('host.invite')} aria-label={t('host.invite')} onClick={invite}>
+            <span className="btn-label collapsible">{t('host.invite')}</span>
+          </Button>
+          {host.players.length > 1 && (
+            <Button icon={<UserMinus size={16} />} onClick={() => setConfirmKickAll(true)}>
+              {t('host.kickAll')}
+            </Button>
+          )}
+          <Button variant="danger" icon={<Power size={16} />} loading={stopping} onClick={() => (host.players.length ? setConfirmStop(true) : stop())}>
+            {t('host.stop')}
+          </Button>
+        </div>
       </div>
 
       <motion.div className="host-grid" variants={stagger} initial="hidden" animate="show">
@@ -308,15 +348,32 @@ function Dashboard({ host }: { host: HostState }) {
           </div>
           <div className="slots-count">{t('host.slots', { used: host.players.length, max: host.maxPlayers })}</div>
           <SlotMeter used={host.players.length} max={host.maxPlayers} />
+          {host.players.length > 0 && capKbps > 0 && (
+            <div className="upload-note" title={t('host.uploadHint')}>
+              <Upload size={13} />
+              {t('host.upload', { mbps: Math.round((host.players.length * capKbps) / 1000) })}
+            </div>
+          )}
         </motion.div>
       </motion.div>
+
+      <AnimatePresence>
+        {/* XInput в Windows видит не больше 4 Xbox-геймпадов: один обычно у самого хоста. */}
+        {host.players.filter((p) => p.perms.gamepad).length + 1 > 4 && (
+          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <Gamepad2 size={18} />
+            <span style={{ flex: 1 }}>{t('host.padLimit')}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {!host.gamepadDriver && (
           <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             <TriangleAlert size={18} />
             <span style={{ flex: 1 }}>{t('host.noGamepadDriver')}</span>
-            <Button size="sm" onClick={() => void api().openExternal(VIGEM_URL)}>
+            <GamepadDriverButton />
+            <Button size="sm" variant="ghost" onClick={() => void api().openExternal(VIGEM_URL)}>
               {t('host.getDriver')}
             </Button>
           </motion.div>
@@ -361,12 +418,30 @@ function Dashboard({ host }: { host: HostState }) {
       </motion.div>
 
       <Modal open={confirmStop} onClose={() => setConfirmStop(false)}>
-        <h3 style={{ marginTop: 0 }}>{t('host.stop')}?</h3>
+        <h3 style={{ marginTop: 0 }}>{t('host.stopTitle')}</h3>
         <p className="muted">{t('host.stopConfirm')}</p>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <Button onClick={() => setConfirmStop(false)}>{t('common.cancel')}</Button>
           <Button variant="danger" icon={<Power size={16} />} onClick={stop}>
             {t('host.stop')}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal open={confirmKickAll} onClose={() => setConfirmKickAll(false)}>
+        <h3 style={{ marginTop: 0 }}>{t('host.kickAllTitle')}</h3>
+        <p className="muted">{t('host.kickAllConfirm')}</p>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <Button onClick={() => setConfirmKickAll(false)}>{t('common.cancel')}</Button>
+          <Button
+            variant="danger"
+            icon={<UserMinus size={16} />}
+            onClick={() => {
+              setConfirmKickAll(false)
+              void api().host.kickAll()
+            }}
+          >
+            {t('host.kickAll')}
           </Button>
         </div>
       </Modal>
@@ -397,6 +472,11 @@ function RequestCard({ r }: { r: JoinRequestView }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="player-name">
           <span className="name-text">{r.nickname}</span>
+          {!r.known && (
+            <span className="pill pill-warning" style={{ height: 20, fontSize: 11.5 }} title={t('host.newDeviceHint')}>
+              {t('host.newDevice')}
+            </span>
+          )}
         </div>
         <div className="faint" style={{ fontSize: 12.5 }}>
           {r.address}
@@ -427,12 +507,13 @@ function PermToggle({ on, icon, label, onClick }: { on: boolean; icon: ReactNode
   )
 }
 
-function PlayerCard({ p }: { p: PlayerView }) {
+function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
   const { t } = useTranslation()
   const toggle = (key: keyof InputPerms): void => void api().host.setPerms(p.deviceId, { [key]: !p.perms[key] })
   const tone = p.status === 'streaming' ? 'pill-success' : p.status === 'pairing' || p.status === 'connecting' ? 'pill-accent' : ''
   return (
     <motion.div
+      ref={ref}
       layout
       className="card player"
       initial={{ opacity: 0, scale: 0.9, y: 16 }}
@@ -452,6 +533,7 @@ function PlayerCard({ p }: { p: PlayerView }) {
             {p.status === 'streaming' && <span className="dot pulse" />}
             {t(`host.status.${p.status}`)}
           </span>
+          {p.rttMs !== undefined && <RttBadge ms={p.rttMs} />}
         </div>
         <motion.button className="btn btn-ghost icon-btn kick" onClick={() => void api().host.kick(p.deviceId)} title={t('host.kick')} aria-label={t('host.kick')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
           <UserMinus size={17} />
@@ -463,5 +545,36 @@ function PlayerCard({ p }: { p: PlayerView }) {
         <PermToggle on={p.perms.gamepad} icon={<Gamepad2 size={17} />} label={t('host.gamepad')} onClick={() => toggle('gamepad')} />
       </div>
     </motion.div>
+  )
+}
+
+/** Задержка до игрока: зелёная до 40 мс, жёлтая до 80 мс, дальше красная (вероятно, ретранслятор Radmin). */
+export function RttBadge({ ms }: { ms: number }) {
+  const { t } = useTranslation()
+  const tone = ms <= 40 ? 'good' : ms <= 80 ? 'mid' : 'bad'
+  return <span className={`rtt ${tone} faint`} style={{ fontSize: 12, marginLeft: 8 }}>{t('host.latency', { ms })}</span>
+}
+
+/** Установка ViGEmBus в одно нажатие (скрипт Apollo с правами администратора). */
+function GamepadDriverButton() {
+  const { t } = useTranslation()
+  const toast = useApp((s) => s.toast)
+  const [busy, setBusy] = useState(false)
+  const install = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await api().host.installGamepad()
+      if (r.ok) toast({ tone: 'success', text: t('host.driverInstalled') })
+      else if (r.cancelled) toast({ tone: 'warning', text: t('errors.install_cancelled') })
+      else toast({ tone: 'danger', text: t('host.driverFailed') }, 8000)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Button size="sm" variant="primary" loading={busy} onClick={() => void install()}>
+      {t('host.installDriver')}
+    </Button>
   )
 }

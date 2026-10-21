@@ -9,6 +9,7 @@ import { isAllowedPeer } from '../src/main/services/net/discovery'
 import { normalizeSettings } from '../src/main/settings'
 import { deepMerge } from '../src/main/store'
 import { buildStreamArgs } from '../src/main/services/moonlight/runner'
+import { parseListOutput } from '../src/main/services/client/controller'
 import ru from '../src/renderer/src/i18n/ru.json'
 import en from '../src/renderer/src/i18n/en.json'
 
@@ -41,6 +42,14 @@ describe('protocol', () => {
     expect(parseHostMessage('{"t":"pairBegin","pin":"0042"}')).toEqual({ t: 'pairBegin', pin: '0042' })
     expect(parseHostMessage('{"t":"pairBegin","pin":"42"}')).toBeNull()
     expect(parseHostMessage('{"t":"hello"}')).toBeNull()
+    const policy = { hostAudio: true, maxBitrateKbps: 20000, hostWidth: 1920, hostHeight: 1080, hostFps: 60 }
+    const perms = { keyboard: true, mouse: true, gamepad: false }
+    expect(parseHostMessage(JSON.stringify({ t: 'joinAccepted', perms, needsPair: false, policy }))?.t).toBe('joinAccepted')
+    // Хост не может подсунуть Moonlight мусор вместо чисел
+    expect(parseHostMessage(JSON.stringify({ t: 'joinAccepted', perms, needsPair: false, policy: { ...policy, hostWidth: '1920x1080 --evil' } }))).toBeNull()
+    expect(parseHostMessage(JSON.stringify({ t: 'joinAccepted', perms: { keyboard: 'yes' }, needsPair: false, policy }))).toBeNull()
+    expect(parseHostMessage(JSON.stringify({ t: 'joinDenied', reason: 'whatever' }))).toBeNull()
+    expect(parseHostMessage(JSON.stringify({ t: 'hostInfo', v: 1, hostName: 'x'.repeat(200), slotsUsed: 0, maxSlots: 4 }))).toBeNull()
   })
 
   it('parses discovery replies', () => {
@@ -140,5 +149,15 @@ describe('i18n', () => {
         expect(lang.errorHints[c], `errorHints.${c}`).toBeTruthy()
       }
     }
+  })
+})
+
+describe('moonlight list output', () => {
+  it('decides pairing from the output, not only the exit code', () => {
+    expect(parseListOutput(0, ['Desktop', 'Steam Big Picture'])).toBe(true)
+    expect(parseListOutput(0, ['Permission Denied'])).toBe(true)
+    expect(parseListOutput(0, ['Computer 26.1.1.1 has not been paired. Please open Moonlight to pair before streaming.'])).toBe(false)
+    expect(parseListOutput(0, ['Failed to connect to 26.1.1.1'])).toBe(false)
+    expect(parseListOutput(-1, [])).toBe(false)
   })
 })

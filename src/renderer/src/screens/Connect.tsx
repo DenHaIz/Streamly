@@ -1,8 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, Check, Clock, Gamepad2, Keyboard, MonitorPlay, Mouse, PlugZap, RefreshCw, Search, TriangleAlert, Unplug, X } from 'lucide-react'
+import { ArrowRight, Check, Clock, Gamepad2, Keyboard, MonitorPlay, Mouse, PlugZap, RefreshCw, Search, TriangleAlert, Unplug, X, Stethoscope } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { ClientState, DiscoveredHost } from '@shared/types'
+import type { ClientState, DiscoveredHost, ErrorCode } from '@shared/types'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { Avatar, Button, riseIn, softSpring, spring, stagger } from '@/components/ui'
@@ -10,6 +10,9 @@ import { RadminHelp } from '@/components/RadminBadge'
 import { ErrorCard } from '@/components/ErrorCard'
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching']
+
+/** Ошибки, при которых полезна «Проверка связи»: она покажет, что именно не так в сети. */
+const NETWORK_ERRORS = new Set<ErrorCode>(['host_unreachable', 'host_not_hosting', 'pair_no_request', 'pair_failed', 'stream_timeout', 'stream_failed', 'connection_lost'])
 
 export function Connect() {
   const client = useApp((s) => s.client)
@@ -42,6 +45,14 @@ function NoRadmin() {
   )
 }
 
+/** Повторный клик, пока подключение уже запускается, не должен обрывать первую попытку. */
+let connectingUntil = 0
+function connectOnce(address: string): void {
+  if (Date.now() < connectingUntil) return
+  connectingUntil = Date.now() + 1500
+  void api().client.connect(address)
+}
+
 const isIp = (s: string): boolean => /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(s) && s.split('.').every((n) => Number(n) <= 255)
 
 function HostList() {
@@ -68,7 +79,7 @@ function HostList() {
 
   const submit = (e: FormEvent): void => {
     e.preventDefault()
-    if (isIp(manual.trim())) void api().client.connect(manual.trim())
+    if (isIp(manual.trim())) connectOnce(manual.trim())
   }
 
   return (
@@ -111,6 +122,16 @@ function HostList() {
           <span className="field-label">{t('connect.manual')}</span>
           <input className="input" placeholder={t('connect.manualPlaceholder')} value={manual} onChange={(e) => setManual(e.target.value.replace(/[^\d.]/g, ''))} maxLength={15} inputMode="decimal" />
         </label>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={!isIp(manual.trim())}
+          icon={<Stethoscope size={16} />}
+          style={{ alignSelf: 'flex-end' }}
+          onClick={() => useApp.getState().openDiag({ mode: 'client', address: manual.trim() })}
+        >
+          {t('connect.check')}
+        </Button>
         <Button type="submit" variant="primary" disabled={!isIp(manual.trim())} icon={<PlugZap size={16} />} style={{ alignSelf: 'flex-end' }}>
           {t('connect.connect')}
         </Button>
@@ -133,7 +154,7 @@ function HostCard({ h }: { h: DiscoveredHost }) {
       whileHover={h.online && !full ? { y: -3 } : undefined}
       whileTap={h.online && !full ? { scale: 0.98 } : undefined}
       transition={softSpring}
-      onClick={() => h.online && !full && void api().client.connect(h.address)}
+      onClick={() => h.online && !full && connectOnce(h.address)}
       disabled={!h.online || full}
     >
       <Avatar name={h.name} />
@@ -182,10 +203,15 @@ function Progress({ client }: { client: ClientState }) {
           )
         })}
       </div>
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {client.phase === 'waitingApproval' && (
-          <motion.p className="muted" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.p key="approval" className="muted" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             {t('connect.approvalHint')}
+          </motion.p>
+        )}
+        {(client.phase === 'pairing' || client.phase === 'launching') && (
+          <motion.p key="firewall" className="faint" style={{ fontSize: 12.5 }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            {t('connect.firewallHint')}
           </motion.p>
         )}
       </AnimatePresence>
@@ -229,6 +255,11 @@ function Streaming({ client }: { client: ClientState }) {
         <span className="dot pulse" />
         {client.host?.name} · <Clock size={12} /> {elapsed}
       </div>
+      <div className="stream-facts">
+        {client.rttMs !== undefined && <span className="pill">{t('connect.latency', { ms: client.rttMs })}</span>}
+        {client.policy?.hostAudio && <span className="pill">{t('connect.hostAudio')}</span>}
+        {!!client.policy?.maxBitrateKbps && <span className="pill">{t('connect.bitrateCap', { mbps: Math.round(client.policy.maxBitrateKbps / 1000) })}</span>}
+      </div>
       <p className="muted">{t('connect.streamingText')}</p>
       <div className="section-title" style={{ justifyContent: 'center', marginTop: 18 }}>
         {t('connect.yourAccess')}
@@ -267,6 +298,11 @@ function Result({ client }: { client: ClientState }) {
         actions={
           <>
             <Button onClick={() => void api().client.reset()}>{t('connect.toHosts')}</Button>
+            {address && NETWORK_ERRORS.has(client.error ?? 'unknown') && (
+              <Button icon={<Stethoscope size={16} />} onClick={() => useApp.getState().openDiag({ mode: 'client', address })}>
+                {t('connect.check')}
+              </Button>
+            )}
             {canRetry && (
               <Button variant="primary" icon={<RefreshCw size={16} />} onClick={() => void api().client.connect(address)}>
                 {t('common.retry')}

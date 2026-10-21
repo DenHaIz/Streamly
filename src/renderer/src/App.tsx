@@ -8,6 +8,7 @@ import { useResolvedTheme } from '@/lib/theme'
 import { IconButton, spring } from '@/components/ui'
 import { RadminBadge } from '@/components/RadminBadge'
 import { PixelLogo } from '@/components/PixelLogo'
+import { DiagnosticsModal } from '@/components/Diagnostics'
 import { Onboarding } from '@/screens/Onboarding'
 import { Home } from '@/screens/Home'
 import { Host } from '@/screens/Host'
@@ -187,6 +188,7 @@ export function App() {
         </AnimatePresence>
       </main>
       <Toasts />
+      <DiagnosticsModal />
     </div>
     </MotionConfig>
   )

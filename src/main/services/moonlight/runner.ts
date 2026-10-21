@@ -2,24 +2,59 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { APOLLO_APP } from '@shared/protocol'
-import type { StreamSettings } from '@shared/types'
+import type { StreamPolicy, StreamSettings } from '@shared/types'
 
 export interface MoonlightProcess {
   readonly child: ChildProcess
   readonly exited: Promise<number>
   kill(): void
+  /** Строки вывода процесса (stdout и stderr). */
+  output?(): string[]
 }
 
-/** Аргументы `Moonlight.exe stream`. Разрешение 'auto' подставляется из экрана клиента (native). */
-export function buildStreamArgs(host: string, s: StreamSettings, native?: { width: number; height: number }): string[] {
+const RES: Record<Exclude<StreamSettings['resolution'], 'auto'>, [number, number]> = {
+  '720': [1280, 720],
+  '1080': [1920, 1080],
+  '1440': [2560, 1440],
+  '4K': [3840, 2160]
+}
+
+/**
+ * Разрешение «авто»: экран клиента, но не больше монитора хоста (выше него картинка
+ * только растягивается, а нагрузка на кодирование и сеть растёт).
+ */
+export function pickResolution(native?: { width: number; height: number }, policy?: StreamPolicy): [number, number] | undefined {
+  if (!native) return policy?.hostWidth ? [policy.hostWidth, policy.hostHeight] : undefined
+  if (policy?.hostWidth && policy.hostHeight && native.width * native.height > policy.hostWidth * policy.hostHeight) {
+    return [policy.hostWidth, policy.hostHeight]
+  }
+  return [native.width, native.height]
+}
+
+/** Битрейт примерно как у Moonlight «авто» (20 Мбит/с на 1080p60), но не выше потолка хоста. */
+export function pickBitrate(s: StreamSettings, size: [number, number] | undefined, fps: number, policy?: StreamPolicy): number | undefined {
+  const cap = policy?.maxBitrateKbps ?? 0
+  if (s.bitrateKbps > 0) return cap > 0 ? Math.min(s.bitrateKbps, cap) : s.bitrateKbps
+  if (cap <= 0) return undefined
+  const [w, h] = size ?? [1920, 1080]
+  const auto = Math.round((20000 * ((w * h) / (1920 * 1080)) * Math.max(fps, 30)) / 60)
+  return Math.max(2000, Math.min(auto, cap))
+}
+
+/** Аргументы `Moonlight.exe stream` с учётом условий хоста (звук, потолок битрейта, монитор хоста). */
+export function buildStreamArgs(host: string, s: StreamSettings, native?: { width: number; height: number }, policy?: StreamPolicy): string[] {
   const args = ['stream', host, APOLLO_APP]
+  const size = s.resolution === 'auto' ? pickResolution(native, policy) : RES[s.resolution]
   if (s.resolution === 'auto') {
-    if (native) args.push('--resolution', `${native.width}x${native.height}`)
+    if (size) args.push('--resolution', `${size[0]}x${size[1]}`)
   } else {
     args.push(`--${s.resolution}`)
   }
-  args.push('--fps', String(s.fps))
-  if (s.bitrateKbps > 0) args.push('--bitrate', String(s.bitrateKbps))
+  // Частоту выше, чем у монитора хоста, Apollo всё равно не захватит.
+  const fps = policy?.hostFps && policy.hostFps >= 30 ? Math.min(s.fps, policy.hostFps) : s.fps
+  args.push('--fps', String(fps))
+  const bitrate = pickBitrate(s, size, fps, policy)
+  if (bitrate) args.push('--bitrate', String(bitrate))
   if (s.codec !== 'auto') args.push('--video-codec', s.codec)
   if (s.packetSize > 0) args.push('--packet-size', String(s.packetSize))
   args.push('--display-mode', s.displayMode)
@@ -27,7 +62,8 @@ export function buildStreamArgs(host: string, s: StreamSettings, native?: { widt
   args.push(s.vsync ? '--vsync' : '--no-vsync')
   args.push(s.framePacing ? '--frame-pacing' : '--no-frame-pacing')
   args.push(s.perfOverlay ? '--performance-overlay' : '--no-performance-overlay')
-  args.push(s.audioOnHost ? '--audio-on-host' : '--no-audio-on-host')
+  // Звук решает хост: при совместной игре он должен слышать игру сам (см. HostSettings.keepHostAudio).
+  args.push(policy?.hostAudio === false ? '--no-audio-on-host' : '--audio-on-host')
   args.push(s.absoluteMouse ? '--absolute-mouse' : '--no-absolute-mouse')
   // Рабочий стол общий для всех: уход одного игрока не должен закрывать его у остальных.
   args.push('--no-quit-after', '--no-game-optimization', '--multi-controller', '--keep-awake')
@@ -98,7 +134,8 @@ export class MoonlightRunner {
       exited,
       kill: () => {
         if (child.exitCode === null && !child.killed) child.kill()
-      }
+      },
+      output: () => [...run.lines]
     }
   }
 
@@ -133,7 +170,7 @@ export class MoonlightRunner {
     return (important.length ? important : run.lines).slice(-maxLines).join('\n')
   }
 
-  stream(host: string, settings: StreamSettings, native?: { width: number; height: number }): MoonlightProcess {
-    return this.spawn(buildStreamArgs(host, settings, native))
+  stream(host: string, settings: StreamSettings, native?: { width: number; height: number }, policy?: StreamPolicy): MoonlightProcess {
+    return this.spawn(buildStreamArgs(host, settings, native, policy))
   }
 }

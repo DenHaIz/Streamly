@@ -1,9 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Sun, Tv } from 'lucide-react'
+import { Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Stethoscope, Sun, Tv } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
-import type { Codec, DisplayMode, Lang, Resolution, CaptureKeys, ThemePref, TrustedFriendView } from '@shared/types'
+import type { Codec, DisplayMode, Lang, Resolution, CaptureKeys, StreamSettings, ThemePref, TrustedFriendView } from '@shared/types'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { PixelLogo } from '@/components/PixelLogo'
@@ -85,15 +85,41 @@ function General() {
           value={nick}
           maxLength={24}
           onChange={(e) => setNick(e.target.value)}
-          onBlur={() => nick.trim() && nick !== s.nickname && void update({ nickname: nick })}
+          onBlur={() => {
+            const clean = nick.trim()
+            // Пустой ник не сохраняем и возвращаем прежний, чтобы было видно, какой действует.
+            if (!clean) return setNick(s.nickname)
+            if (clean !== s.nickname) void update({ nickname: clean })
+          }}
           onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
         />
       </Row>
       <Row title={t('settings.autostart')}>
         <Switch checked={s.autostart} onChange={(v) => void update({ autostart: v })} />
       </Row>
+      <Row title={t('settings.autoStartHosting')} hint={t('settings.autoStartHostingHint')}>
+        <Switch checked={s.host.autoStartHosting} onChange={(v) => void update({ host: { autoStartHosting: v } })} />
+      </Row>
+      <Row title={t('settings.closeToTray')} hint={t('settings.closeToTrayHint')}>
+        <Switch checked={s.closeToTray} onChange={(v) => void update({ closeToTray: v })} />
+      </Row>
     </div>
   )
+}
+
+type Preset = 'economy' | 'balanced' | 'high'
+const PRESETS: Record<Preset, Pick<StreamSettings, 'resolution' | 'fps' | 'bitrateKbps'>> = {
+  economy: { resolution: '720', fps: 30, bitrateKbps: 5000 },
+  balanced: { resolution: 'auto', fps: 60, bitrateKbps: 0 },
+  high: { resolution: 'auto', fps: 60, bitrateKbps: 40000 }
+}
+
+function currentPreset(st: StreamSettings): Preset | 'custom' {
+  const hit = (Object.keys(PRESETS) as Preset[]).find((k) => {
+    const p = PRESETS[k]
+    return p.resolution === st.resolution && p.fps === st.fps && p.bitrateKbps === st.bitrateKbps
+  })
+  return hit ?? 'custom'
 }
 
 function StreamTab() {
@@ -101,8 +127,24 @@ function StreamTab() {
   const st = useApp((x) => x.settings)!.stream
   const update = useApp((x) => x.updateSettings)
   const set = (patch: Partial<typeof st>): void => void update({ stream: patch })
+  const preset = currentPreset(st)
   return (
+    <div style={{ display: 'grid', gap: 16 }}>
     <div className="card card-pad">
+      <div className="section-title">{t('settings.quality')}</div>
+      <Segmented<Preset | 'custom'>
+        value={preset}
+        onChange={(v) => v !== 'custom' && set(PRESETS[v])}
+        options={(['economy', 'balanced', 'high', 'custom'] as const).map((v) => ({ value: v, label: t(`settings.presets.${v}`) }))}
+      />
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div key={preset} className="preset-hint" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.16 }}>
+          {t(`settings.presetsHint.${preset}`)}
+        </motion.div>
+      </AnimatePresence>
+    </div>
+    <div className="card card-pad">
+      <div className="section-title">{t('settings.advanced')}</div>
       <Row title={t('settings.resolution')}>
         <Select<Resolution>
           value={st.resolution}
@@ -125,7 +167,9 @@ function StreamTab() {
           onChange={(v) => set({ bitrateKbps: v })}
           options={[
             { value: 0, label: t('settings.bitrateAuto') },
-            ...[5, 10, 20, 30, 50, 80, 120].map((m) => ({ value: m * 1000, label: t('settings.mbps', { value: m }) }))
+            ...[...new Set([5, 10, 15, 20, 30, 40, 50, 80, 120, ...(st.bitrateKbps ? [st.bitrateKbps / 1000] : [])])]
+              .sort((a, b) => a - b)
+              .map((m) => ({ value: m * 1000, label: t('settings.mbps', { value: m }) }))
           ]}
         />
       </Row>
@@ -160,9 +204,6 @@ function StreamTab() {
       <Row title={t('settings.perfOverlay')}>
         <Switch checked={st.perfOverlay} onChange={(v) => set({ perfOverlay: v })} />
       </Row>
-      <Row title={t('settings.audioOnHost')}>
-        <Switch checked={st.audioOnHost} onChange={(v) => set({ audioOnHost: v })} />
-      </Row>
       <Row title={t('settings.captureKeys')}>
         <Select<CaptureKeys>
           value={st.captureSystemKeys}
@@ -174,9 +215,10 @@ function StreamTab() {
         <Select<number>
           value={st.packetSize}
           onChange={(v) => set({ packetSize: v })}
-          options={[{ value: 0, label: t('common.auto') }, ...[1024, 1200, 1300, 1392].map((v) => ({ value: v, label: `${v} B` }))]}
+          options={[{ value: 0, label: t('common.auto') }, ...[1024, 1200, 1300, 1392].map((v) => ({ value: v, label: t('settings.bytes', { value: v }) }))]}
         />
       </Row>
+    </div>
     </div>
   )
 }
@@ -222,8 +264,29 @@ function HostTab() {
             ))}
           </div>
         </Row>
+        <Row title={t('settings.maxBitrate')} hint={t('settings.maxBitrateHint')}>
+          <Select<number>
+            value={h.maxBitrateKbps}
+            onChange={(v) => void update({ host: { maxBitrateKbps: v } })}
+            options={[
+              ...[5, 10, 15, 20, 30, 50].map((m) => ({ value: m * 1000, label: t('settings.mbps', { value: m }) })),
+              { value: 0, label: t('settings.unlimited') }
+            ]}
+          />
+        </Row>
+        <Row title={t('settings.keepHostAudio')} hint={t('settings.keepHostAudioHint')}>
+          <Switch checked={h.keepHostAudio} onChange={(v) => void update({ host: { keepHostAudio: v } })} />
+        </Row>
+        <Row title={t('settings.notifyRequests')}>
+          <Switch checked={h.notifyRequests} onChange={(v) => void update({ host: { notifyRequests: v } })} />
+        </Row>
         <Row title={t('settings.virtualDisplay')} hint={t('settings.virtualDisplayHint')}>
           <Switch checked={h.useVirtualDisplay} onChange={(v) => void update({ host: { useVirtualDisplay: v } })} />
+        </Row>
+        <Row title={t('settings.selfCheck')} hint={t('settings.selfCheckHint')}>
+          <Button size="sm" icon={<Stethoscope size={15} />} onClick={() => useApp.getState().openDiag({ mode: 'host' })}>
+            {t('host.selfCheck')}
+          </Button>
         </Row>
       </div>
 
@@ -275,7 +338,7 @@ function About() {
       </Row>
       <Row title="Apollo">
         <span className={`pill ${info?.apolloInstalled ? 'pill-success' : info?.apolloBundled ? 'pill-accent' : 'pill-danger'}`}>
-          {info?.apolloInstalled ? t('settings.installed') : info?.apolloBundled ? `${t('settings.notInstalled')} · ${t('settings.bundled')}` : t('settings.notBundled')}
+          {info?.apolloInstalled ? t('settings.installed') : info?.apolloBundled ? t('settings.notInstalledBundled') : t('settings.notBundled')}
         </span>
       </Row>
       <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>

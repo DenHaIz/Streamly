@@ -68,7 +68,7 @@ class FakeApollo implements ApolloLike {
   async restart(): Promise<void> {}
 }
 
-function fakeProcess(onKill?: () => void, exitCode?: number): MoonlightProcess {
+function fakeProcess(onKill?: () => void, exitCode?: number, lines: string[] = []): MoonlightProcess {
   let done!: (code: number) => void
   const exited = new Promise<number>((r) => (done = r))
   let alive = true
@@ -84,7 +84,8 @@ function fakeProcess(onKill?: () => void, exitCode?: number): MoonlightProcess {
       alive = false
       onKill?.()
       done(0)
-    }
+    },
+    output: () => lines
   }
 }
 
@@ -107,7 +108,9 @@ class FakeMoonlight implements MoonlightLike {
   }
   list(): MoonlightProcess {
     const c = this.myClient()
-    return fakeProcess(undefined, c && (c.perm & 0x1000000) !== 0 ? 0 : 1)
+    if (!c) return fakeProcess(undefined, 0, ['Computer 127.0.0.1 has not been paired. Please open Moonlight to pair before streaming.'])
+    // Без права list Apollo отдаёт заглушку «Permission Denied» — но сопряжение при этом есть.
+    return fakeProcess(undefined, 0, (c.perm & 0x1000000) !== 0 ? ['Desktop', 'Steam Big Picture'] : ['Permission Denied'])
   }
   stream(): MoonlightProcess {
     const c = this.myClient()
@@ -142,10 +145,21 @@ async function waitFor<T>(fn: () => T | undefined | false, timeoutMs = 5000): Pr
   }
 }
 
+const service = { running: true, starts: 0, stops: 0 }
 const installer: InstallerLike = {
   hasBundledInstaller: true,
-  status: async () => ({ installed: true, running: true, firewall: true, gamepadDriver: true, sunshineRunning: false }),
-  setup: async () => ({ ok: true })
+  status: async () => ({ installed: true, running: service.running, firewall: true, gamepadDriver: true, sunshineRunning: false, serviceControl: true }),
+  setup: async () => ({ ok: true }),
+  startService: async () => {
+    service.starts++
+    service.running = true
+    return true
+  },
+  stopService: async () => {
+    service.stops++
+    service.running = false
+    return true
+  }
 }
 
 let portSeq = 0
@@ -168,6 +182,8 @@ function setup(maxPlayers = 4) {
     signalingPort: port,
     discoveryPort: 0,
     pollMs: 40,
+    displayMode: () => ({ width: 1920, height: 1080, fps: 60 }),
+    portOpen: async () => true,
     pairTimeoutMs: 2500
   })
 
@@ -216,6 +232,9 @@ describe('host ↔ client flow', () => {
 
     await host.respond(req.id, 'trust')
     await waitFor(() => client.getState().phase === 'streaming')
+    // Хост передал условия трансляции, а задержка до хоста измеряется
+    expect(client.getState().policy).toMatchObject({ hostAudio: true, maxBitrateKbps: 20000, hostWidth: 1920 })
+    await waitFor(() => client.getState().rttMs !== undefined)
     const ac = apollo.clients[0]
     expect(ac.name).toContain('Вася')
     expect(ac.perm).toBe(toApolloPerm({ keyboard: true, mouse: true, gamepad: true }))
@@ -354,4 +373,80 @@ describe('host ↔ client flow', () => {
     await waitFor(() => a.client.getState().phase === 'streaming' && b.client.getState().phase === 'streaming', 10000)
     expect(apollo.maxLaunching).toBe(1)
   }, 15000)
+
+  it('disconnects everyone at once and checks itself', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const a = makeClient('A')
+    const b = makeClient('B')
+    cleanups.push(() => a.client.cancel(), () => b.client.cancel())
+    await a.client.connect('127.0.0.1')
+    await b.client.connect('127.0.0.1')
+    await waitFor(() => host.getState().requests.length === 2)
+    for (const r of host.getState().requests) await host.respond(r.id, 'allow')
+    await waitFor(() => host.getState().players.filter((p) => p.status === 'streaming').length === 2, 10000)
+    await host.kickAll()
+    await waitFor(() => a.client.getState().error === 'kicked' && b.client.getState().error === 'kicked')
+    expect(apollo.clients.every((c) => c.perm === 0)).toBe(true)
+
+    const report = await host.selfCheck()
+    expect(report.items.find((i) => i.id === 'hosting')?.status).toBe('ok')
+    expect(report.items.find((i) => i.id === 'apolloPorts')?.status).toBe('ok')
+    expect(report.summary).toBe('hostOk')
+  }, 15000)
+
+  it('keeps the connection after the stream ends: reconnect without a new approval', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Оля')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    await host.respond((await waitFor(() => host.getState().requests[0])).id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    // Друг закрыл окно Moonlight: стрим закончен, но он остаётся допущенным
+    ;(client as unknown as { streamProc: MoonlightProcess }).streamProc.kill()
+    await waitFor(() => client.getState().phase === 'ended')
+    expect(host.getState().players).toHaveLength(1)
+    await client.connect('127.0.0.1')
+    await waitFor(() => client.getState().phase === 'streaming')
+    expect(host.getState().requests).toHaveLength(0)
+    expect(moonlight.pairs).toBe(1)
+  }, 15000)
+
+  it('cleans up an orphaned Apollo pairing the host forgot about', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    // Apollo помнит старое сопряжение «Миша», а хост — нет (например, после переустановки Streamly)
+    apollo.clients.push({
+      name: 'Миша · Streamly-abcdef',
+      uuid: 'orphan',
+      display_mode: '',
+      perm: 0,
+      enable_legacy_ordering: true,
+      allow_client_commands: true,
+      always_use_virtual_display: false,
+      connected: false
+    })
+    const { client } = makeClient('Миша')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    await host.respond((await waitFor(() => host.getState().requests[0])).id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    expect(apollo.clients.some((c) => c.uuid === 'orphan')).toBe(false)
+  }, 15000)
+
+  it('runs Apollo only while hosting', async () => {
+    const { host } = setup()
+    service.running = false
+    const starts = service.starts
+    await host.start()
+    expect(host.getState().phase).toBe('running')
+    expect(service.starts).toBe(starts + 1)
+    await host.stop()
+    expect(service.running).toBe(false)
+    service.running = true
+  })
 })

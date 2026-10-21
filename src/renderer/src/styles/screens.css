@@ -800,3 +800,193 @@ pre.error-detail {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+/* ---------- Проверка связи ---------- */
+
+.diag-title {
+  margin: 0 0 2px;
+  font-size: 18px;
+}
+
+.diag-target {
+  font-size: 12.5px;
+  margin-bottom: 10px;
+}
+
+.diag-summary {
+  height: auto;
+  min-height: 30px;
+  padding: 4px 12px;
+  margin: 8px 0 14px;
+  white-space: normal;
+  font-weight: 650;
+}
+
+.diag-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+.diag-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.diag-item.ok .diag-icon {
+  color: var(--success);
+}
+.diag-item.warn .diag-icon {
+  color: var(--warning);
+}
+.diag-item.fail .diag-icon {
+  color: var(--danger);
+}
+.diag-item.skip .diag-icon {
+  color: var(--text-faint);
+}
+
+.diag-item.fail {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.diag-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.diag-text {
+  min-width: 0;
+}
+
+.diag-name {
+  font-weight: 600;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.diag-value {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.diag-hint {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  user-select: text;
+}
+
+.diag-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.modal:has(.diag) {
+  width: min(540px, 100%);
+}
+
+/* ---------- Как начать ---------- */
+
+.how {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.how-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.how-num {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.host-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.upload-note {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rtt {
+  font-variant-numeric: tabular-nums;
+}
+
+.rtt.good {
+  color: var(--success-text);
+}
+.rtt.mid {
+  color: var(--warning-text);
+}
+.rtt.bad {
+  color: var(--danger-text);
+}
+
+.preset-hint {
+  font-size: 12.5px;
+  color: var(--text-faint);
+  margin-top: 6px;
+}
+
+.stream-facts {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+
+.manual .btn-ghost {
+  border-color: var(--border);
+}
+
+.host-actions {
+  flex-wrap: nowrap;
+}
+
+/* На узком окне второстепенные кнопки хоста — только иконка (подпись в подсказке). */
+@media (max-width: 1000px) {
+  .host-actions .btn-label.collapsible {
+    display: none;
+  }
+  .host-actions .btn:has(.collapsible) {
+    padding: 0 12px;
+  }
+}

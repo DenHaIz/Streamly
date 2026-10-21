@@ -21,7 +21,6 @@ export interface StreamSettings {
   /** 0 = авто (Moonlight решает сам, для VPN это 1024). */
   packetSize: number
   captureSystemKeys: CaptureKeys
-  audioOnHost: boolean
   /** Курсор «как на рабочем столе» (абсолютная мышь); для игр лучше выключить. */
   absoluteMouse: boolean
 }
@@ -30,6 +29,24 @@ export interface HostSettings {
   maxPlayers: number
   defaultPerms: InputPerms
   useVirtualDisplay: boolean
+  /** Потолок битрейта на одного игрока, кбит/с (0 — без ограничения). Apollo кодирует поток каждому отдельно. */
+  maxBitrateKbps: number
+  /** Звук игры остаётся и на колонках хоста (иначе Apollo может переключить вывод на виртуальное устройство). */
+  keepHostAudio: boolean
+  /** Уведомлять о запросах на подключение, когда окно Streamly не активно. */
+  notifyRequests: boolean
+  /** Включать режим хоста сразу при запуске Streamly. */
+  autoStartHosting: boolean
+}
+
+/** Условия трансляции, которые хост сообщает игроку при допуске. */
+export interface StreamPolicy {
+  hostAudio: boolean
+  maxBitrateKbps: number
+  /** Разрешение и частота основного монитора хоста: выше них стримить бессмысленно. */
+  hostWidth: number
+  hostHeight: number
+  hostFps: number
 }
 
 export interface RecentHost {
@@ -45,6 +62,8 @@ export interface Settings {
   nickname: string
   deviceId: string
   autostart: boolean
+  /** Крестик сворачивает Streamly в трей, пока идёт хостинг или трансляция. */
+  closeToTray: boolean
   stream: StreamSettings
   host: HostSettings
   recentHosts: RecentHost[]
@@ -56,6 +75,7 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
   onboarded: false,
   theme: 'system',
   autostart: false,
+  closeToTray: true,
   stream: {
     resolution: 'auto',
     fps: 60,
@@ -67,13 +87,16 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     perfOverlay: false,
     packetSize: 0,
     captureSystemKeys: 'fullscreen',
-    audioOnHost: false,
     absoluteMouse: true
   },
   host: {
     maxPlayers: 4,
     defaultPerms: { keyboard: true, mouse: true, gamepad: true },
-    useVirtualDisplay: false
+    useVirtualDisplay: false,
+    maxBitrateKbps: 20000,
+    keepHostAudio: true,
+    notifyRequests: true,
+    autoStartHosting: false
   },
   recentHosts: []
 }
@@ -96,6 +119,7 @@ export type ErrorCode =
   | 'port_busy'
   | 'host_unreachable'
   | 'host_not_hosting'
+  | 'host_busy'
   | 'sunshine_conflict'
   | 'pair_no_request'
   | 'stream_timeout'
@@ -132,6 +156,8 @@ export interface PlayerView {
   perms: InputPerms
   trusted: boolean
   since: number
+  /** Задержка до игрока по сети (мс), измеряется по сигнальному соединению. */
+  rttMs?: number
 }
 
 export interface JoinRequestView {
@@ -140,6 +166,8 @@ export interface JoinRequestView {
   nickname: string
   address: string
   at: number
+  /** Устройство уже подключалось раньше (иначе — «новое устройство», стоит сверить ник). */
+  known: boolean
 }
 
 export interface HostState {
@@ -181,6 +209,28 @@ export interface ClientState {
   errorDetail?: string
   perms?: InputPerms
   startedAt?: number
+  /** Задержка до хоста (мс). */
+  rttMs?: number
+  policy?: StreamPolicy
+}
+
+// ---------- Проверка связи ----------
+
+export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip'
+
+/** Один пункт проверки. id — ключ перевода (diag.checks.<id>), hint — ключ подсказки (diag.hints.<hint>). */
+export interface CheckItem {
+  id: string
+  status: CheckStatus
+  value?: string
+  hint?: string
+}
+
+export interface CheckReport {
+  target?: string
+  items: CheckItem[]
+  /** Итог: ключ перевода diag.summary.<summary>. */
+  summary: string
 }
 
 export type HostSource = 'broadcast' | 'scan' | 'recent' | 'manual'

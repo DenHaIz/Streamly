@@ -4,6 +4,8 @@ import {
   Copy,
   Download,
   Gamepad2,
+  Headphones,
+  Info,
   Keyboard,
   LogIn,
   Mouse,
@@ -19,6 +21,7 @@ import {
   Radio,
   UserPlus,
   Users,
+  WifiOff,
   X
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode, type Ref } from 'react'
@@ -380,6 +383,17 @@ function Dashboard({ host }: { host: HostState }) {
         )}
       </AnimatePresence>
 
+      <AudioBanner host={host} />
+
+      <AnimatePresence>
+        {host.pendingRestart && (
+          <motion.div className="card warn-card info" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <Info size={18} />
+            <span style={{ flex: 1 }}>{t('host.pendingRestart')}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence initial={false}>
         {host.requests.length > 0 && (
           <motion.section initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={softSpring}>
@@ -495,9 +509,17 @@ function RequestCard({ r }: { r: JoinRequestView }) {
   )
 }
 
-function PermToggle({ on, icon, label, onClick }: { on: boolean; icon: ReactNode; label: string; onClick: () => void }) {
+function PermToggle({ on, selfOff, icon, label, onClick }: { on: boolean; selfOff?: boolean; icon: ReactNode; label: string; onClick: () => void }) {
+  const { t } = useTranslation()
   return (
-    <motion.button className={`perm ${on ? 'on' : ''}`} onClick={onClick} whileTap={{ scale: 0.92 }} transition={spring} aria-pressed={on} title={label}>
+    <motion.button
+      className={`perm ${on ? 'on' : ''} ${on && selfOff ? 'self-off' : ''}`}
+      onClick={onClick}
+      whileTap={{ scale: 0.92 }}
+      transition={spring}
+      aria-pressed={on}
+      title={on && selfOff ? t('host.selfOffHint', { what: label.toLowerCase() }) : label}
+    >
       <motion.span className="perm-icon" animate={{ rotate: on ? 0 : -8, scale: on ? 1 : 0.92 }} transition={spring}>
         {icon}
       </motion.span>
@@ -534,17 +556,64 @@ function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
             {t(`host.status.${p.status}`)}
           </span>
           {p.rttMs !== undefined && <RttBadge ms={p.rttMs} />}
+          <div className="player-tags">
+            <AnimatePresence initial={false}>
+              {p.poorNetwork && (
+                <motion.span key="net" className="pill pill-warning tag" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} title={t('host.poorNetworkHint')}>
+                  <WifiOff size={11} />
+                  {t('host.poorNetwork')}
+                </motion.span>
+              )}
+              {p.muteChat && (
+                <motion.span key="chat" className="pill tag" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} title={t('host.muteChatHint')}>
+                  <Headphones size={11} />
+                  {t('host.muteChat')}
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
         <motion.button className="btn btn-ghost icon-btn kick" onClick={() => void api().host.kick(p.deviceId)} title={t('host.kick')} aria-label={t('host.kick')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
           <UserMinus size={17} />
         </motion.button>
       </div>
       <div className="perms">
-        <PermToggle on={p.perms.keyboard} icon={<Keyboard size={17} />} label={t('host.keyboard')} onClick={() => toggle('keyboard')} />
-        <PermToggle on={p.perms.mouse} icon={<Mouse size={17} />} label={t('host.mouse')} onClick={() => toggle('mouse')} />
-        <PermToggle on={p.perms.gamepad} icon={<Gamepad2 size={17} />} label={t('host.gamepad')} onClick={() => toggle('gamepad')} />
+        <PermToggle on={p.perms.keyboard} selfOff={p.selfOff.keyboard} icon={<Keyboard size={17} />} label={t('host.keyboard')} onClick={() => toggle('keyboard')} />
+        <PermToggle on={p.perms.mouse} selfOff={p.selfOff.mouse} icon={<Mouse size={17} />} label={t('host.mouse')} onClick={() => toggle('mouse')} />
+        <PermToggle on={p.perms.gamepad} selfOff={p.selfOff.gamepad} icon={<Gamepad2 size={17} />} label={t('host.gamepad')} onClick={() => toggle('gamepad')} />
       </div>
     </motion.div>
+  )
+}
+
+/**
+ * Звук хоста: Discord убран из трансляции, или игроки просят убрать, но это невозможно (и почему).
+ */
+function AudioBanner({ host }: { host: HostState }) {
+  const { t } = useTranslation()
+  const a = host.audio
+  const asked = host.players.some((p) => p.muteChat)
+  let tone: 'ok' | 'warn' | null = null
+  let text = ''
+  if (a.error && a.chatControl) {
+    tone = 'warn'
+    text = t('host.audioError', { error: a.error })
+  } else if (a.chatControl && a.chatExcluded) {
+    tone = 'ok'
+    text = a.monitoring ? t('host.chatExcludedMonitor') : t('host.chatExcluded')
+  } else if (asked && !a.chatControl && a.unavailable) {
+    tone = 'warn'
+    text = t(`host.chatUnavailable.${a.unavailable}`)
+  }
+  return (
+    <AnimatePresence>
+      {tone && (
+        <motion.div key={tone + text} className={`card warn-card ${tone === 'ok' ? 'info' : ''}`} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <Headphones size={18} />
+          <span style={{ flex: 1 }}>{text}</span>
+        </motion.div>
+      )}
+    </AnimatePresence>
   )
 }
 

@@ -40,3 +40,12 @@ export function fromApolloPerm(perm: number): InputPerms {
     gamepad: (perm & PERM.inputController) !== 0
   }
 }
+
+/** Права, которые реально действуют: выданные хостом минус то, что игрок выключил себе сам. */
+export function effectivePerms(granted: InputPerms, selfOff: InputPerms = NO_INPUT): InputPerms {
+  return {
+    keyboard: granted.keyboard && !selfOff.keyboard,
+    mouse: granted.mouse && !selfOff.mouse,
+    gamepad: granted.gamepad && !selfOff.gamepad
+  }
+}

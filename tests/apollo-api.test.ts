@@ -138,6 +138,14 @@ describe('ApolloApi', () => {
     expect(fake.posted).toHaveLength(1)
   })
 
+  it('an empty value removes the key (back to the Apollo default) and is not a change twice', async () => {
+    fake.config.output_name = '{11111111-2222-3333-4444-555555555555}'
+    expect(await api.patchConfig({ output_name: '' })).toBe(true)
+    expect(fake.posted[0]).not.toHaveProperty('output_name')
+    expect(await api.patchConfig({ output_name: '' })).toBe(false)
+    expect(fake.posted).toHaveLength(1)
+  })
+
   it('submits PIN only when a pairing is pending', async () => {
     expect(await api.submitPin('1234', 'Friend')).toBe(false)
     fake.pinPending = true

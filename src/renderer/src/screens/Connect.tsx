@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, Check, Clock, Gamepad2, Keyboard, MonitorPlay, Mouse, PlugZap, RefreshCw, Search, TriangleAlert, Unplug, X, Stethoscope } from 'lucide-react'
+import { ArrowRight, Check, Clock, MonitorPlay, PlugZap, RefreshCw, Search, TriangleAlert, Unplug, X, Stethoscope } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ClientState, DiscoveredHost, ErrorCode } from '@shared/types'
@@ -8,6 +8,7 @@ import { api } from '@/lib/bridge'
 import { Avatar, Button, riseIn, softSpring, spring, stagger } from '@/components/ui'
 import { RadminHelp } from '@/components/RadminBadge'
 import { ErrorCard } from '@/components/ErrorCard'
+import { StreamControls } from '@/components/StreamControls'
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching']
 
@@ -239,14 +240,8 @@ function useElapsed(since?: number): string {
 function Streaming({ client }: { client: ClientState }) {
   const { t } = useTranslation()
   const elapsed = useElapsed(client.startedAt)
-  const perms = client.perms
-  const items = [
-    { key: 'keyboard', icon: <Keyboard size={16} />, label: t('host.keyboard'), on: perms?.keyboard },
-    { key: 'mouse', icon: <Mouse size={16} />, label: t('host.mouse'), on: perms?.mouse },
-    { key: 'gamepad', icon: <Gamepad2 size={16} />, label: t('host.gamepad'), on: perms?.gamepad }
-  ]
   return (
-    <motion.div className="card card-pad center-card" {...fade}>
+    <motion.div className="card card-pad center-card stream-card" {...fade}>
       <motion.div className="setup-orb success" initial={{ scale: 0.5, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: 'spring', stiffness: 260, damping: 14 }}>
         <MonitorPlay size={28} />
       </motion.div>
@@ -257,22 +252,15 @@ function Streaming({ client }: { client: ClientState }) {
       </div>
       <div className="stream-facts">
         {client.rttMs !== undefined && <span className="pill">{t('connect.latency', { ms: client.rttMs })}</span>}
+        {client.jitterMs !== undefined && client.jitterMs >= 10 && <span className="pill pill-warning">{t('connect.jitter', { ms: client.jitterMs })}</span>}
         {client.policy?.hostAudio && <span className="pill">{t('connect.hostAudio')}</span>}
         {!!client.policy?.maxBitrateKbps && <span className="pill">{t('connect.bitrateCap', { mbps: Math.round(client.policy.maxBitrateKbps / 1000) })}</span>}
       </div>
-      <p className="muted">{t('connect.streamingText')}</p>
-      <div className="section-title" style={{ justifyContent: 'center', marginTop: 18 }}>
-        {t('connect.yourAccess')}
+      <div className="kbd-hint">
+        <kbd className="kbd">Alt+F2</kbd>
+        <span>{t('connect.overlayHint')}</span>
       </div>
-      <div className="perms" style={{ justifyContent: 'center', marginBottom: 20 }}>
-        {items.map((i) => (
-          <motion.span key={i.key} className={`perm static ${i.on ? 'on' : ''}`} layout animate={{ opacity: i.on ? 1 : 0.55 }} transition={spring}>
-            <span className="perm-icon">{i.icon}</span>
-            {i.label}
-            <motion.span className="perm-led" animate={{ opacity: i.on ? 1 : 0.25, scale: i.on ? 1 : 0.7 }} />
-          </motion.span>
-        ))}
-      </div>
+      <StreamControls />
       <Button variant="danger" icon={<Unplug size={16} />} onClick={() => void api().client.cancel()}>
         {t('connect.disconnect')}
       </Button>

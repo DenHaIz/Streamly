@@ -30,6 +30,8 @@ interface AppStore {
   host: HostState | null
   client: ClientState
   hosts: DiscoveredHost[]
+  /** Меню Alt+F2 (только в его окне). */
+  overlay: { open: boolean; screens: number }
   toasts: Toast[]
   init(): Promise<void>
   go(screen: Screen): void
@@ -52,6 +54,7 @@ export const useApp = create<AppStore>((set, get) => ({
   host: null,
   client: { phase: 'idle' },
   hosts: [],
+  overlay: { open: false, screens: 1 },
   toasts: [],
   diag: null,
   openDiag: (target) => set({ diag: target }),
@@ -72,6 +75,7 @@ export const useApp = create<AppStore>((set, get) => ({
     b.on('hostState', (h) => set({ host: h }))
     b.on('clientState', (c) => set({ client: c }))
     b.on('hosts', (h) => set({ hosts: h }))
+    b.on('overlay', (o) => set({ overlay: o }))
     set({ settings, radmin, appInfo, host, client, hosts, ready: true, screen: settings.onboarded ? 'home' : 'onboarding' })
   },
 

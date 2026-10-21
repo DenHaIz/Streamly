@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { toApolloPerm, type InputPerms } from '@shared/perms'
+import { effectivePerms, NO_INPUT, toApolloPerm, type InputPerms } from '@shared/perms'
 import {
   parseClientMessage,
   PROTOCOL_VERSION,
@@ -11,10 +11,24 @@ import {
   type HostMessage,
   type PairFailReason
 } from '@shared/protocol'
-import type { CheckItem, CheckReport, ErrorCode, HostState, JoinRequestView, PlayerStatus, PlayerView, StreamPolicy, TrustedFriendView } from '@shared/types'
+import type {
+  CheckItem,
+  CheckReport,
+  ErrorCode,
+  HostAudioState,
+  HostDisplay,
+  HostState,
+  JoinRequestView,
+  PlayerStatus,
+  PlayerView,
+  StreamPolicy,
+  TrustedFriendView
+} from '@shared/types'
 import type { JoinDecision } from '@shared/ipc'
 import type { ApolloApi, ApolloClient } from '../apollo/api'
 import { ApolloError } from '../apollo/api'
+import { parseDisplayDevices } from '../apollo/displays'
+import type { RouterOptions, RouterState } from '../helper/helper'
 import type { ApolloInstallStatus, SetupOptions } from '../apollo/installer'
 import type { ElevatedResult } from '../../elevate'
 import type { SecretsService, SettingsService, TrustedFriend } from '../../settings'
@@ -22,8 +36,26 @@ import { DiscoveryResponder, isAllowedPeer } from '../net/discovery'
 
 export type ApolloLike = Pick<
   ApolloApi,
-  'probe' | 'setInitialCredentials' | 'login' | 'listClients' | 'setPerm' | 'disconnect' | 'unpair' | 'submitPin' | 'patchConfig' | 'restart'
+  | 'probe'
+  | 'setInitialCredentials'
+  | 'login'
+  | 'listClients'
+  | 'setPerm'
+  | 'disconnect'
+  | 'unpair'
+  | 'submitPin'
+  | 'patchConfig'
+  | 'restart'
+  | 'getLogs'
+  | 'closeApp'
 >
+
+/** Маршрутизация звука хоста (StreamlyHelper): Discord мимо трансляции. */
+export interface AudioRouterLike extends EventEmitter {
+  readonly available: boolean
+  readonly routerState: RouterState | null
+  router(opts: RouterOptions): Promise<RouterState>
+}
 
 export interface InstallerLike {
   readonly hasBundledInstaller: boolean
@@ -56,6 +88,12 @@ export interface HostDeps {
   denyCooldownMs?: number
   /** Сколько запрос ждёт решения хоста, прежде чем соединение закрывается. */
   requestTimeoutMs?: number
+  /** Маршрутизация звука (без неё «убрать Discord» недоступно). */
+  audio?: AudioRouterLike
+  /** Последний известный список мониторов (между запусками Apollo). */
+  displaysCache?: { get(): HostDisplay[]; set(list: HostDisplay[]): void }
+  /** Сколько ждать после ухода последнего игрока, прежде чем закрыть «Desktop» в Apollo. */
+  idleCloseMs?: number
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -76,6 +114,11 @@ interface Peer {
   since: number
   pairing: boolean
   pairSpawned?: () => void
+  /** Что игрок выключил себе сам. */
+  selfOff: InputPerms
+  /** Игрок просит убрать Discord из трансляции. */
+  muteChat: boolean
+  poorNetwork: boolean
   /** Ограничение частоты сообщений (маркерное ведро). */
   tokens: number
   tokensAt: number
@@ -94,6 +137,8 @@ const BUCKET_SIZE = 40
 const BUCKET_RATE = 8
 /** Уведомления о запросах с одного адреса не чаще раза в 5 с. */
 const NOTIFY_EVERY_MS = 5000
+/** Доля избыточных пакетов (FEC), %. Apollo по умолчанию — 20. */
+const FEC = { normal: 20, high: 30 } as const
 
 /** Остановка хоста во время асинхронной операции: дальше ничего не делаем. */
 class Cancelled extends Error {}
@@ -127,9 +172,24 @@ export class HostController extends EventEmitter {
   private lastPollError = 0
   private serviceControl = false
   gamepadDriver = true
+  /** Мониторы хоста по логу Apollo. */
+  private displays: HostDisplay[] = []
+  /** Настройки Apollo, с которыми он сейчас запущен (монитор, FEC): если отличаются, нужен перезапуск. */
+  private appliedConfig = ''
+  private pendingRestart = false
+  private reconfiguring = false
+  /** Звук идёт через виртуальные колонки, и Discord можно убрать из трансляции. */
+  private routingMode = false
+  private lastRouter = ''
+  private lastAudioSig = ''
+  /** Когда Apollo последний раз видел хоть один поток (для закрытия «Desktop» после ухода всех). */
+  private lastStreamAt = 0
+  private appOpen = false
 
   constructor(private readonly d: HostDeps) {
     super()
+    this.displays = d.displaysCache?.get() ?? []
+    d.audio?.on('router', () => this.onRouterState())
   }
 
   private log(msg: string, err?: unknown): void {
@@ -153,7 +213,10 @@ export class HostController extends EventEmitter {
           perms: f?.perms ?? this.d.settings.get().host.defaultPerms,
           trusted: f?.trusted ?? false,
           since: p.since,
-          rttMs: p.rttMs
+          rttMs: p.rttMs,
+          selfOff: p.selfOff,
+          muteChat: p.muteChat,
+          poorNetwork: p.poorNetwork
         })
       } else if (p.requestId) {
         requests.push({
@@ -176,7 +239,45 @@ export class HostController extends EventEmitter {
       maxPlayers: this.d.settings.get().host.maxPlayers,
       players,
       requests,
-      gamepadDriver: this.gamepadDriver
+      gamepadDriver: this.gamepadDriver,
+      audio: this.audioView(),
+      pendingRestart: this.pendingRestart
+    }
+  }
+
+  private audioView(): HostAudioState {
+    const a = this.d.audio
+    const st = a?.routerState
+    const h = this.d.settings.get().host
+    let unavailable: HostAudioState['unavailable']
+    if (!this.routingMode) {
+      if (!a?.available) unavailable = 'noHelper'
+      else if (!h.chatRouting) unavailable = 'disabled'
+      else if (st && !st.virtualFound) unavailable = 'noVirtualSink'
+    }
+    return {
+      chatControl: this.routingMode,
+      unavailable,
+      chatExcluded: this.routingMode && !!st?.chatExcluded,
+      monitoring: this.routingMode && !!st?.monitoring,
+      error: st?.error ?? undefined
+    }
+  }
+
+  /** Помощник сообщил новое состояние звука: обновляем панель и игроков. */
+  private onRouterState(): void {
+    this.recomputeRouting()
+    this.emitState()
+    this.broadcastAudio()
+  }
+
+  private broadcastAudio(force = false): void {
+    const a = this.audioView()
+    const sig = `${a.chatControl} ${a.chatExcluded}`
+    if (!force && sig === this.lastAudioSig) return
+    this.lastAudioSig = sig
+    for (const p of this.peers.values()) {
+      if (p.admitted) this.send(p, { t: 'audioState', chatControl: a.chatControl, chatExcluded: a.chatExcluded })
     }
   }
 
@@ -328,17 +429,7 @@ export class HostController extends EventEmitter {
     }
     this.check(gen)
 
-    const settings = this.d.settings.get()
-    const changed = await this.d.apollo.patchConfig({
-      sunshine_name: `${settings.nickname} (Streamly)`,
-      // Веб-интерфейс Apollo только с этого ПК: друзья из Radmin (WAN для Apollo) его не увидят.
-      origin_web_ui_allowed: 'pc',
-      headless_mode: settings.host.useVirtualDisplay ? 'enabled' : 'disabled',
-      // Не менять разрешение и частоту монитора хоста под каждого игрока: хост играет на нём сам.
-      dd_configuration_option: 'disabled',
-      // Потолок битрейта на игрока: Apollo кодирует каждому отдельный поток, а исходящий канал хоста общий.
-      max_bitrate: String(settings.host.maxBitrateKbps)
-    })
+    const changed = await this.d.apollo.patchConfig(this.apolloConfig())
     this.check(gen)
     if (changed) {
       await this.d.apollo.restart()
@@ -347,15 +438,161 @@ export class HostController extends EventEmitter {
       await this.d.apollo.login(this.d.secrets.get().apollo)
       this.check(gen)
     }
+    this.appliedConfig = this.configSig()
+    this.pendingRestart = false
+    await this.refreshDisplays()
+    this.check(gen)
+    // Звук настраиваем до допуска игроков: от этого зависят условия трансляции, которые они получат.
+    await this.updateAudio(true)
+    this.check(gen)
 
     // Пока Streamly не допустил клиента, у него нет прав: прямое подключение Moonlight в обход приложения не пройдёт.
     await this.lockdownAll(false)
+    this.check(gen)
+    // «Desktop», оставшийся от прошлого запуска (например, после сбоя), держал бы виртуальный монитор и настройки экранов.
+    await this.d.apollo.closeApp().catch(() => false)
+    this.appOpen = false
     this.check(gen)
     this.kicked.clear()
     this.denyUntil.clear()
     await this.listen(gen)
     this.check(gen)
     this.setPhase('running')
+  }
+
+  /** Настройки Apollo, которыми управляет Streamly. */
+  private apolloConfig(): Record<string, string> {
+    const s = this.d.settings.get()
+    const h = s.host
+    const virtual = h.display === 'virtual'
+    return {
+      sunshine_name: `${s.nickname} (Streamly)`,
+      // Веб-интерфейс Apollo только с этого ПК: друзья из Radmin (WAN для Apollo) его не увидят.
+      origin_web_ui_allowed: 'pc',
+      // Виртуальный монитор Apollo создаёт под разрешение игрока. Сам по себе это пустой дополнительный экран
+      // (у друзей — чёрная картинка), поэтому на время игры он становится основным или единственным.
+      headless_mode: virtual ? 'enabled' : 'disabled',
+      // Физический монитор хоста не трогаем: ни разрешение, ни частоту, ни расположение (хост играет на нём сам).
+      dd_configuration_option: virtual ? (h.virtualOnly ? 'ensure_only_display' : 'ensure_primary') : 'disabled',
+      output_name: virtual || h.display === 'primary' ? '' : h.display,
+      // Потолок битрейта на игрока: Apollo кодирует каждому отдельный поток, а исходящий канал хоста общий.
+      max_bitrate: String(h.maxBitrateKbps),
+      // Избыточные пакеты: потеря части пакетов восстанавливается без пропуска кадра.
+      fec_percentage: String(FEC[h.lossProtection])
+    }
+  }
+
+  private configSig(): string {
+    return JSON.stringify(this.apolloConfig())
+  }
+
+  /** Мониторы хоста из лога Apollo (он перечисляет их с id при запуске). */
+  private async refreshDisplays(): Promise<void> {
+    try {
+      const list = parseDisplayDevices(await this.d.apollo.getLogs())
+      if (list.length) {
+        this.displays = list
+        this.d.displaysCache?.set(list)
+      }
+    } catch (e) {
+      this.log('displays', e instanceof Error ? e.message : e)
+    }
+  }
+
+  listDisplays(): HostDisplay[] {
+    return this.displays
+  }
+
+  /** Настройки поменялись: звук применяется сразу, монитор и FEC — перезапуском Apollo, когда никто не играет. */
+  onSettingsChanged(): void {
+    if (this.phase !== 'running') return
+    void this.updateAudio()
+    if (this.configSig() === this.appliedConfig) {
+      if (this.pendingRestart) {
+        this.pendingRestart = false
+        this.emitState()
+      }
+      return
+    }
+    if (this.appOpen || this.activeLaunch) {
+      if (!this.pendingRestart) {
+        this.pendingRestart = true
+        this.emitState()
+      }
+      return
+    }
+    void this.reconfigure()
+  }
+
+  /** Применяет изменённые настройки Apollo перезапуском (несколько секунд, игроки в это время не играют). */
+  private async reconfigure(): Promise<void> {
+    if (this.reconfiguring || this.phase !== 'running') return
+    const gen = this.gen
+    this.reconfiguring = true
+    try {
+      if (await this.d.apollo.patchConfig(this.apolloConfig())) {
+        this.check(gen)
+        await this.d.apollo.restart()
+        await sleep(1500)
+        if ((await this.waitForApollo(30_000, gen)) !== 'ok') throw new Error('Apollo did not come back after restart')
+        await this.d.apollo.login()
+        this.check(gen)
+        await this.refreshDisplays()
+      }
+      this.appliedConfig = this.configSig()
+      this.pendingRestart = false
+      this.log('apollo reconfigured')
+      this.emitState()
+    } catch (e) {
+      if (!(e instanceof Cancelled)) this.log('reconfigure failed', e)
+    } finally {
+      this.reconfiguring = false
+    }
+  }
+
+  /**
+   * Маршрутизация звука: включена на время хостинга. Discord уходит мимо трансляции, если об этом
+   * просит хоть один игрок (звук у всех общий: Apollo захватывает одно устройство на всех).
+   */
+  private async updateAudio(active = this.phase === 'running'): Promise<void> {
+    const a = this.d.audio
+    if (!a?.available) {
+      this.routingMode = false
+      return
+    }
+    const h = this.d.settings.get().host
+    const opts: RouterOptions = {
+      enabled: active && h.chatRouting,
+      monitor: h.keepHostAudio,
+      excludeChat: [...this.peers.values()].some((p) => p.admitted && p.muteChat)
+    }
+    const sig = JSON.stringify(opts)
+    if (sig !== this.lastRouter) {
+      this.lastRouter = sig
+      try {
+        await a.router(opts)
+      } catch (e) {
+        this.lastRouter = ''
+        this.log('audio router', e instanceof Error ? e.message : e)
+      }
+    }
+    this.recomputeRouting(active)
+  }
+
+  /**
+   * Режим «звук через виртуальные колонки». Apollo выбирает устройство по первой сессии,
+   * поэтому, пока кто-то играет, режим не меняем: новые игроки получат те же условия.
+   */
+  private recomputeRouting(active = this.phase === 'running'): void {
+    if (this.appOpen && active) return
+    const st = this.d.audio?.routerState
+    const next = active && this.d.settings.get().host.chatRouting && !!this.d.audio?.available && !!st?.virtualFound
+    if (next !== this.routingMode) {
+      this.routingMode = next
+      this.log(`audio routing ${next ? 'on' : 'off'}`)
+      this.emitState()
+      this.broadcastAudio()
+    }
   }
 
   /**
@@ -482,6 +719,10 @@ export class HostController extends EventEmitter {
         this.log('lockdown on stop failed', e)
       }
     }
+    // Звук хоста возвращается как было: Discord снова «по умолчанию», повтор колонок выключен.
+    await this.updateAudio(false)
+    this.appOpen = false
+    this.pendingRestart = false
     // Служба Apollo нужна только на время хостинга: после перезагрузки ПК она сама не запустится.
     if (wasActive && this.serviceControl) await this.d.installer.stopService().catch(() => false)
     this.starting = false
@@ -511,13 +752,17 @@ export class HostController extends EventEmitter {
     )
   }
 
-  /** Выдаёт (perms) или забирает (null) права. Выдача проверяет, что хост не остановили. */
+  /**
+   * Выдаёт (perms — права от хоста) или забирает (null) права. Действуют выданные хостом
+   * минус то, что игрок выключил себе сам. Выдача проверяет, что хост не остановили.
+   */
   private async applyPerms(deviceId: string, perms: InputPerms | null, gen = this.gen): Promise<void> {
     const uuid = this.friend(deviceId)?.apolloUuid
     if (!uuid) return
+    const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
     try {
       if (perms && gen !== this.gen) return
-      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(perms) : 0)
+      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(effectivePerms(perms, peer?.selfOff)) : 0)
       if (!perms) await this.d.apollo.disconnect(uuid)
     } catch (e) {
       this.log(`applyPerms ${deviceId}`, e)
@@ -553,7 +798,7 @@ export class HostController extends EventEmitter {
         p.status = next
         changed = true
       }
-      const want = toApolloPerm(f.perms)
+      const want = toApolloPerm(effectivePerms(f.perms, p.selfOff))
       if (c.perm !== want && gen === this.gen) await this.d.apollo.setPerm(c.uuid, want).catch(() => undefined)
     }
     for (const c of clients) {
@@ -563,6 +808,32 @@ export class HostController extends EventEmitter {
     }
     this.pumpLaunches()
     if (changed) this.emitState()
+    await this.idleCheck(clients.some((c) => c.connected && known.has(c.uuid)), gen)
+  }
+
+  /**
+   * Все игроки ушли: закрываем «Desktop» в Apollo. Он убирает виртуальный монитор и возвращает экраны
+   * и звук хоста, иначе пустой монитор оставался бы до остановки хоста. Заодно применяем отложенные настройки.
+   */
+  private async idleCheck(anyStreaming: boolean, gen: number): Promise<void> {
+    if (anyStreaming) {
+      this.lastStreamAt = Date.now()
+      if (!this.appOpen) {
+        this.appOpen = true
+        this.emitState()
+      }
+      return
+    }
+    const launching = !!this.activeLaunch || this.launchQueue.length > 0
+    if (launching || gen !== this.gen) return
+    if (this.appOpen && Date.now() - this.lastStreamAt > (this.d.idleCloseMs ?? 12_000)) {
+      this.appOpen = false
+      this.log('all players left: closing Desktop in Apollo')
+      await this.d.apollo.closeApp().catch((e: unknown) => this.log('closeApp failed', e instanceof Error ? e.message : e))
+      this.recomputeRouting()
+      this.emitState()
+    }
+    if (!this.appOpen && this.pendingRestart) void this.reconfigure()
   }
 
   // ---------- Сигнализация ----------
@@ -593,6 +864,9 @@ export class HostController extends EventEmitter {
       status: 'waiting',
       since: Date.now(),
       pairing: false,
+      selfOff: { ...NO_INPUT },
+      muteChat: false,
+      poorNetwork: false,
       tokens: BUCKET_SIZE,
       tokensAt: Date.now()
     }
@@ -630,6 +904,7 @@ export class HostController extends EventEmitter {
     if (peer.deviceId && peer.admitted) {
       const stillHere = [...this.peers.values()].some((p) => p.deviceId === peer.deviceId && p.admitted)
       if (!stillHere) await this.applyPerms(peer.deviceId, null)
+      if (peer.muteChat) await this.updateAudio()
     }
     this.emitState()
   }
@@ -716,7 +991,26 @@ export class HostController extends EventEmitter {
         if (peer.admitted) {
           if (this.activeLaunch?.peerId === peer.id) this.activeLaunch = null
           peer.status = 'waiting'
+          peer.poorNetwork = false
           this.pumpLaunches()
+          this.emitState()
+        }
+        return
+      case 'prefs': {
+        const selfOff: InputPerms = { keyboard: msg.selfOff.keyboard, mouse: msg.selfOff.mouse, gamepad: msg.selfOff.gamepad }
+        const inputChanged = JSON.stringify(selfOff) !== JSON.stringify(peer.selfOff)
+        const chatChanged = peer.muteChat !== msg.muteChat
+        peer.selfOff = selfOff
+        peer.muteChat = msg.muteChat
+        const f = this.friend(peer.deviceId)
+        if (inputChanged && peer.admitted && f?.apolloUuid) await this.applyPerms(peer.deviceId, f.perms)
+        if (chatChanged && peer.admitted) await this.updateAudio()
+        return this.emitState()
+      }
+      case 'netStatus':
+        if (peer.admitted && peer.poorNetwork !== msg.poor) {
+          peer.poorNetwork = msg.poor
+          if (msg.poor) this.log(`poor network reported by ${peer.nickname} (rtt ${peer.rttMs ?? '?'} ms)`)
           this.emitState()
         }
         return
@@ -742,9 +1036,12 @@ export class HostController extends EventEmitter {
   /** Условия трансляции для игроков: звук на хосте, потолок битрейта, монитор хоста. */
   policy(): StreamPolicy {
     const h = this.d.settings.get().host
-    const mode = this.d.displayMode?.()
+    // Виртуальный монитор создаётся под разрешение игрока: ограничивать нечего.
+    const chosen = this.displays.find((d) => d.id === h.display)
+    const mode = h.display === 'virtual' ? undefined : chosen?.width ? chosen : this.d.displayMode?.()
     return {
-      hostAudio: h.keepHostAudio,
+      // Через виртуальные колонки: Apollo захватывает их, а хост слышит игру через повтор помощника.
+      hostAudio: this.routingMode ? false : h.keepHostAudio,
       maxBitrateKbps: h.maxBitrateKbps,
       hostWidth: mode?.width ?? 0,
       hostHeight: mode?.height ?? 0,
@@ -846,6 +1143,9 @@ export class HostController extends EventEmitter {
     if (gen !== this.gen || !this.peers.has(peer.id)) return
     if (!needsPair) await this.applyPerms(deviceId, f.perms, gen)
     this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy() })
+    const audio = this.audioView()
+    this.send(peer, { t: 'audioState', chatControl: audio.chatControl, chatExcluded: audio.chatExcluded })
+    if (peer.muteChat) await this.updateAudio()
     this.emitState()
   }
 
@@ -1009,6 +1309,19 @@ export class HostController extends EventEmitter {
     add('hosting', hosting ? 'ok' : 'warn', 'hosting')
     const h = this.d.settings.get().host
     add('audio', h.keepHostAudio ? 'ok' : 'warn', 'hostAudio')
+    if (hosting) {
+      const audio = this.audioView()
+      const hint = audio.error
+        ? 'chatRoutingError'
+        : audio.unavailable === 'noVirtualSink'
+          ? 'noVirtualSink'
+          : audio.unavailable === 'disabled'
+            ? 'chatDisabled'
+            : 'noHelper'
+      // Discord мимо трансляции — дополнительная возможность: выключена в настройках — не проблема.
+      const status = audio.chatControl && !audio.error ? 'ok' : audio.unavailable === 'disabled' || audio.unavailable === 'noHelper' ? 'skip' : 'warn'
+      add('chatRouting', status, hint, audio.error)
+    }
     const failed = items.some((i) => i.status === 'fail')
     return { target: address, items, summary: failed ? 'hostProblems' : items.some((i) => i.status === 'warn') ? 'hostWarnings' : 'hostOk' }
   }
@@ -1026,6 +1339,7 @@ export class HostController extends EventEmitter {
     }
     this.pumpLaunches()
     await this.applyPerms(deviceId, null)
+    await this.updateAudio()
     this.emitState()
   }
 

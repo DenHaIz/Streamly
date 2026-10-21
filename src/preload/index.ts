@@ -32,7 +32,8 @@ const bridge: StreamlyBridge = {
     installGamepad: () => invoke(IPC.hostInstallGamepad),
     selfCheck: () => invoke(IPC.hostSelfCheck),
     listTrusted: () => invoke(IPC.hostListTrusted),
-    removeTrusted: (id) => invoke(IPC.hostRemoveTrusted, id)
+    removeTrusted: (id) => invoke(IPC.hostRemoveTrusted, id),
+    listDisplays: () => invoke(IPC.hostListDisplays)
   },
   client: {
     getState: () => invoke(IPC.clientGetState),
@@ -41,7 +42,13 @@ const bridge: StreamlyBridge = {
     connect: (address) => invoke(IPC.clientConnect, address),
     diagnose: (address) => invoke(IPC.clientDiagnose, address),
     cancel: () => invoke(IPC.clientCancel),
-    reset: () => invoke(IPC.clientReset)
+    reset: () => invoke(IPC.clientReset),
+    setSelfOff: (patch) => invoke(IPC.clientSetSelfOff, patch),
+    restartStream: () => invoke(IPC.clientRestartStream)
+  },
+  overlay: {
+    close: () => invoke(IPC.overlayClose),
+    toOtherScreen: () => invoke(IPC.overlayOtherScreen)
   },
   on: (event, cb) => {
     let set = listeners.get(event)

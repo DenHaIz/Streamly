@@ -1,7 +1,7 @@
 {
   "name": "streamly",
   "productName": "Streamly",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Простой стриминг рабочего стола для друзей через Radmin VPN (Apollo + Moonlight)",
   "main": "out/main/index.js",
   "license": "GPL-3.0-only",
@@ -14,9 +14,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "fetch-vendor": "node scripts/fetch-vendor.mjs",
-    "dist": "npm run build && electron-builder --win nsis",
+    "dist": "npm run build:helper && node scripts/check-vendor.mjs && npm run build && electron-builder --win nsis",
     "icon": "node scripts/make-icon.mjs",
-    "pack": "npm run build && electron-builder --win --dir"
+    "pack": "npm run build:helper && node scripts/check-vendor.mjs && npm run build && electron-builder --win --dir",
+    "build:helper": "node scripts/build-helper.mjs"
   },
   "dependencies": {
     "ws": "^8.18.3"

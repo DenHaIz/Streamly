@@ -1,13 +1,14 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Stethoscope, Sun, Tv } from 'lucide-react'
+import { Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Stethoscope, Sun, Tv, Volume2 } from 'lucide-react'
+import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
-import type { Codec, DisplayMode, Lang, Resolution, CaptureKeys, StreamSettings, ThemePref, TrustedFriendView } from '@shared/types'
+import type { Codec, DisplayMode, HostDisplay, Lang, LossProtection, Resolution, CaptureKeys, ThemePref, TrustedFriendView } from '@shared/types'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { PixelLogo } from '@/components/PixelLogo'
-import { Avatar, Button, Row, Segmented, Select, softSpring, spring, Switch } from '@/components/ui'
+import { Avatar, Button, Row, Segmented, Select, Slider, softSpring, spring, Switch } from '@/components/ui'
 
 type Tab = 'general' | 'stream' | 'host' | 'about'
 
@@ -107,21 +108,6 @@ function General() {
   )
 }
 
-type Preset = 'economy' | 'balanced' | 'high'
-const PRESETS: Record<Preset, Pick<StreamSettings, 'resolution' | 'fps' | 'bitrateKbps'>> = {
-  economy: { resolution: '720', fps: 30, bitrateKbps: 5000 },
-  balanced: { resolution: 'auto', fps: 60, bitrateKbps: 0 },
-  high: { resolution: 'auto', fps: 60, bitrateKbps: 40000 }
-}
-
-function currentPreset(st: StreamSettings): Preset | 'custom' {
-  const hit = (Object.keys(PRESETS) as Preset[]).find((k) => {
-    const p = PRESETS[k]
-    return p.resolution === st.resolution && p.fps === st.fps && p.bitrateKbps === st.bitrateKbps
-  })
-  return hit ?? 'custom'
-}
-
 function StreamTab() {
   const { t } = useTranslation()
   const st = useApp((x) => x.settings)!.stream
@@ -142,6 +128,21 @@ function StreamTab() {
           {t(`settings.presetsHint.${preset}`)}
         </motion.div>
       </AnimatePresence>
+    </div>
+    <div className="card card-pad">
+      <div className="section-title">{t('settings.inGame')}</div>
+      <Row title={t('stream.volume')} hint={t('settings.volumeHint')}>
+        <div className="slider-field">
+          <Slider value={st.volume} onChange={(v) => set({ volume: v })} />
+          <span className="sc-value">{st.volume}%</span>
+        </div>
+      </Row>
+      <Row title={t('stream.muteChat')} hint={t('settings.muteChatHint')}>
+        <Switch checked={st.muteHostChat} onChange={(v) => set({ muteHostChat: v })} />
+      </Row>
+      <Row title={t('settings.overlayKey')} hint={t('settings.overlayKeyHint')}>
+        <kbd className="kbd">Alt+F2</kbd>
+      </Row>
     </div>
     <div className="card card-pad">
       <div className="section-title">{t('settings.advanced')}</div>
@@ -228,10 +229,25 @@ function HostTab() {
   const h = useApp((x) => x.settings)!.host
   const update = useApp((x) => x.updateSettings)
   const [trusted, setTrusted] = useState<TrustedFriendView[] | null>(null)
+  const [displays, setDisplays] = useState<HostDisplay[]>([])
+  const pendingRestart = useApp((x) => x.host?.pendingRestart)
 
   useEffect(() => {
     void api().host.listTrusted().then(setTrusted)
+    void api().host.listDisplays().then(setDisplays)
   }, [])
+
+  const known = displays.some((d) => d.id === h.display)
+  const displayOptions = [
+    { value: 'primary', label: t('settings.displayPrimary') },
+    ...displays.map((d, i) => ({
+      value: d.id,
+      label: `${d.name || t('settings.displayN', { n: i + 1 })}${d.width ? ` · ${d.width}×${d.height}${d.fps ? ` · ${t('settings.hz', { value: d.fps })}` : ''}` : ''}${d.primary ? ` (${t('settings.displayIsPrimary')})` : ''}`
+    })),
+    // Монитор из настроек сейчас не подключён (или список ещё не получен): оставляем его в списке.
+    ...(h.display !== 'primary' && h.display !== 'virtual' && !known ? [{ value: h.display, label: t('settings.displayMissing') }] : []),
+    { value: 'virtual', label: t('settings.displayVirtual') }
+  ]
 
   // Только изменённый пункт: быстрые нажатия по разным пунктам не затирают друг друга.
   const setDefault = (key: keyof InputPerms, v: boolean): void => void update({ host: { defaultPerms: { [key]: v } } })
@@ -274,15 +290,59 @@ function HostTab() {
             ]}
           />
         </Row>
-        <Row title={t('settings.keepHostAudio')} hint={t('settings.keepHostAudioHint')}>
-          <Switch checked={h.keepHostAudio} onChange={(v) => void update({ host: { keepHostAudio: v } })} />
-        </Row>
         <Row title={t('settings.notifyRequests')}>
           <Switch checked={h.notifyRequests} onChange={(v) => void update({ host: { notifyRequests: v } })} />
         </Row>
-        <Row title={t('settings.virtualDisplay')} hint={t('settings.virtualDisplayHint')}>
-          <Switch checked={h.useVirtualDisplay} onChange={(v) => void update({ host: { useVirtualDisplay: v } })} />
+      </div>
+
+      <div className="card card-pad">
+        <div className="section-title">
+          <Monitor size={14} />
+          {t('settings.hostScreen')}
+        </div>
+        <Row title={t('settings.display')} hint={displays.length ? t('settings.displayHint') : t('settings.displayHintEmpty')}>
+          <Select<string> value={h.display} onChange={(v) => void update({ host: { display: v } })} options={displayOptions} />
         </Row>
+        <AnimatePresence initial={false}>
+          {h.display === 'virtual' && (
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={softSpring} style={{ overflow: 'hidden' }}>
+              <div className="info-note">{t('settings.virtualExplain')}</div>
+              <Row title={t('settings.virtualOnly')} hint={t('settings.virtualOnlyHint')}>
+                <Switch checked={h.virtualOnly} onChange={(v) => void update({ host: { virtualOnly: v } })} />
+              </Row>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <Row title={t('settings.lossProtection')} hint={t('settings.lossProtectionHint')}>
+          <Segmented<LossProtection>
+            value={h.lossProtection}
+            onChange={(v) => void update({ host: { lossProtection: v } })}
+            options={(['normal', 'high'] as const).map((v) => ({ value: v, label: t(`settings.loss.${v}`) }))}
+          />
+        </Row>
+        <AnimatePresence initial={false}>
+          {pendingRestart && (
+            <motion.div className="info-note warn" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+              {t('settings.pendingRestart')}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      <div className="card card-pad">
+        <div className="section-title">
+          <Volume2 size={14} />
+          {t('settings.hostSound')}
+        </div>
+        <Row title={t('settings.keepHostAudio')} hint={t('settings.keepHostAudioHint')}>
+          <Switch checked={h.keepHostAudio} onChange={(v) => void update({ host: { keepHostAudio: v } })} />
+        </Row>
+        <Row title={t('settings.chatRouting')} hint={t('settings.chatRoutingHint')}>
+          <Switch checked={h.chatRouting} onChange={(v) => void update({ host: { chatRouting: v } })} />
+        </Row>
+      </div>
+
+      <div className="card card-pad">
         <Row title={t('settings.selfCheck')} hint={t('settings.selfCheckHint')}>
           <Button size="sm" icon={<Stethoscope size={15} />} onClick={() => useApp.getState().openDiag({ mode: 'host' })}>
             {t('host.selfCheck')}

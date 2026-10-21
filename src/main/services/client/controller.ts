@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
-import type { InputPerms } from '@shared/perms'
+import { NO_INPUT, type InputPerms } from '@shared/perms'
 import { parseHostMessage, PROTOCOL_VERSION, SIGNALING_PORT, type ClientMessage, type HostMessage } from '@shared/protocol'
 import type { ClientState, DiscoveredHost, ErrorCode, HostSource, StreamPolicy, StreamSettings } from '@shared/types'
 import type { SecretsService, SettingsService } from '../../settings'
@@ -40,12 +40,29 @@ export interface ClientDeps {
   moonlightLog?: (since: number) => string | undefined
   /** Пауза перед закрытием окна сопряжения, чтобы Moonlight успел сохранить сертификат хоста. */
   pairSettleMs?: number
+  /** Сколько связь должна быть нормальной, прежде чем снять пометку «плохая связь». */
+  poorNetworkClearMs?: number
   log?: (msg: string, err?: unknown) => void
 }
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching', 'streaming']
 
 type TimerName = 'start' | 'lost' | 'pair' | 'queue'
+
+/** Moonlight пишет в лог «Connection status update: N»: 1 — плохая связь, 0 — нормальная. */
+export function parseConnectionStatus(line: string): boolean | undefined {
+  const m = /Connection status update: (\d+)/.exec(line)
+  if (!m) return undefined
+  return m[1] !== '0'
+}
+
+/** Разброс задержки: среднее отклонение соседних замеров. */
+export function jitter(samples: number[]): number | undefined {
+  if (samples.length < 3) return undefined
+  let sum = 0
+  for (let i = 1; i < samples.length; i++) sum += Math.abs(samples[i] - samples[i - 1])
+  return Math.round(sum / (samples.length - 1))
+}
 
 /**
  * Сопряжён ли Moonlight с хостом — по выводу `Moonlight list`. Код выхода сам по себе ненадёжен:
@@ -79,6 +96,12 @@ export class ClientController extends EventEmitter {
   private discovering = false
   /** Номер попытки: колбэки старых попыток игнорируются. */
   private attempt = 0
+  /** Что игрок выключил себе сам (держится до отключения от хоста). */
+  private selfOff: InputPerms = { ...NO_INPUT }
+  private rttSamples: number[] = []
+  /** Поток закрыт ради перезапуска с новыми настройками: после выхода Moonlight сразу встаём в очередь. */
+  private restartPending = false
+  private poorTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly d: ClientDeps) {
     super()
@@ -171,8 +194,15 @@ export class ClientController extends EventEmitter {
       perms: undefined,
       startedAt: undefined,
       rttMs: undefined,
-      policy: undefined
+      jitterMs: undefined,
+      policy: undefined,
+      selfOff: { ...NO_INPUT },
+      hostChat: undefined,
+      poorNetwork: false,
+      restarting: false
     })
+    this.selfOff = { ...NO_INPUT }
+    this.rttSamples = []
 
     const ws = new WebSocket(`ws://${address}:${this.d.signalingPort ?? SIGNALING_PORT}`, { handshakeTimeout: this.d.connectTimeoutMs ?? 10_000 })
     this.ws = ws
@@ -244,6 +274,7 @@ export class ClientController extends EventEmitter {
         this.admittedAt = address
         this.d.settings.rememberHost(address, this.state.host?.name ?? address)
         this.set({ phase: 'pairing', perms: msg.perms, policy: msg.policy })
+        this.sendPrefs()
         // Сопряжение целиком не может длиться бесконечно, что бы ни случилось по дороге.
         this.startTimer('pair', this.d.pairTimeoutMs ?? 90_000, attempt, () => this.fail('pair_failed', 'timeout'))
         // Хост — источник истины: если он не знает нас в Apollo, сопрягаемся заново.
@@ -297,8 +328,13 @@ export class ClientController extends EventEmitter {
       case 'pong':
         if (typeof msg.ts === 'number') {
           const rtt = Math.max(0, Date.now() - msg.ts)
-          if (rtt !== this.state.rttMs) this.set({ rttMs: rtt })
+          this.rttSamples = [...this.rttSamples, rtt].slice(-10)
+          const j = jitter(this.rttSamples)
+          if (rtt !== this.state.rttMs || j !== this.state.jitterMs) this.set({ rttMs: rtt, jitterMs: j })
         }
+        return
+      case 'audioState':
+        this.set({ hostChat: { control: msg.chatControl, excluded: msg.chatExcluded } })
         return
     }
   }
@@ -352,6 +388,11 @@ export class ClientController extends EventEmitter {
     const proc = this.d.moonlight.stream(address, settings.stream, this.d.nativeResolution?.(), this.state.policy)
     this.streamProc = proc
     this.streamStartedAt = startedAt
+    proc.onLine?.((line) => {
+      const poor = parseConnectionStatus(line)
+      if (poor !== undefined && attempt === this.attempt && this.streamProc === proc) this.onConnectionStatus(poor)
+    })
+    this.emit('streamProcess', proc.child?.pid)
     this.send({ t: 'sessionStarted' })
     this.startTimer('start', this.d.streamStartTimeoutMs ?? 45_000, attempt, () => {
       // Moonlight запущен, а хост так и не увидел подключение: скорее всего, окно ошибки Moonlight.
@@ -364,6 +405,13 @@ export class ClientController extends EventEmitter {
       this.clearTimer('lost')
       this.streamProc = null
       this.send({ t: 'sessionEnded' })
+      this.onConnectionStatus(false, true)
+      if (this.restartPending && this.launchAddress && this.ws?.readyState === WebSocket.OPEN) {
+        // Перезапуск с новыми настройками: снова в очередь запусков, без нового одобрения.
+        this.restartPending = false
+        return this.launch(attempt, this.launchAddress)
+      }
+      this.restartPending = false
       if (this.state.phase === 'launching') {
         // Закрылся, так и не начав стрим: ошибка запуска (подробности — в логе Moonlight).
         return this.fail('stream_failed', [`exit ${code}`, this.d.moonlightLog?.(startedAt)].filter(Boolean).join('\n'))
@@ -378,7 +426,9 @@ export class ClientController extends EventEmitter {
     if (streaming) {
       this.clearTimer('start')
       this.clearTimer('lost')
-      if (this.state.phase !== 'streaming') this.set({ phase: 'streaming', startedAt: this.state.startedAt ?? Date.now() })
+      if (this.state.phase !== 'streaming' || this.state.restarting) {
+        this.set({ phase: 'streaming', startedAt: this.state.startedAt ?? Date.now(), restarting: false })
+      }
       return
     }
     // Хост больше не видит стрим, а Moonlight ещё открыт (например, с окном «соединение потеряно»).
@@ -391,6 +441,52 @@ export class ClientController extends EventEmitter {
     const t = this.timers[name]
     if (t) clearTimeout(t)
     this.timers[name] = undefined
+  }
+
+  /** Moonlight сообщил о качестве связи. Плохую показываем сразу, нормальную — после паузы, чтобы не мигать. */
+  private onConnectionStatus(poor: boolean, immediate = false): void {
+    if (this.poorTimer) clearTimeout(this.poorTimer)
+    this.poorTimer = null
+    const apply = (v: boolean): void => {
+      if (this.state.poorNetwork === v) return
+      this.set({ poorNetwork: v })
+      this.send({ t: 'netStatus', poor: v })
+    }
+    if (poor || immediate) return apply(poor)
+    this.poorTimer = setTimeout(() => apply(false), this.d.poorNetworkClearMs ?? 6000)
+  }
+
+  private sendPrefs(): void {
+    this.send({ t: 'prefs', muteChat: this.d.settings.get().stream.muteHostChat, selfOff: this.selfOff })
+  }
+
+  /** Игрок выключает (или включает) себе клавиатуру, мышь или геймпад. Хост применяет это сразу. */
+  setSelfOff(patch: Partial<InputPerms>): void {
+    const pick = (k: keyof InputPerms): boolean => (typeof patch[k] === 'boolean' ? (patch[k] as boolean) : this.selfOff[k])
+    this.selfOff = { keyboard: pick('keyboard'), mouse: pick('mouse'), gamepad: pick('gamepad') }
+    this.set({ selfOff: this.selfOff })
+    this.sendPrefs()
+  }
+
+  /** Настройки игрока поменялись (например, «не слышать Discord хоста»): сообщаем хосту. */
+  prefsChanged(): void {
+    if (this.admittedAt) this.sendPrefs()
+  }
+
+  /** PID окна трансляции Moonlight (для громкости и меню Alt+F2). */
+  get streamPid(): number | undefined {
+    return this.streamProc?.child?.pid
+  }
+
+  /** Перезапуск трансляции с текущими настройками (быстрые настройки качества). Одобрение хоста не нужно. */
+  restartStream(): boolean {
+    if (this.state.phase !== 'streaming' || !this.streamProc || !this.launchAddress) return false
+    this.restartPending = true
+    this.set({ restarting: true })
+    const proc = this.streamProc
+    if (proc.close) proc.close()
+    else proc.kill()
+    return true
   }
 
   /** Отмена подключения или отключение от стрима. */
@@ -410,6 +506,9 @@ export class ClientController extends EventEmitter {
     this.attempt++
     this.awaitingPair = false
     this.admittedAt = null
+    this.restartPending = false
+    if (this.poorTimer) clearTimeout(this.poorTimer)
+    this.poorTimer = null
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.pingTimer = null
     for (const name of Object.keys(this.timers) as TimerName[]) this.clearTimer(name)
@@ -418,7 +517,9 @@ export class ClientController extends EventEmitter {
     this.listProc?.kill()
     this.listProc = null
     if (this.streamProc) {
-      this.streamProc.kill()
+      // Мягкое закрытие: Moonlight сообщает Apollo об отключении, и место у хоста освобождается сразу.
+      if (this.streamProc.close) this.streamProc.close()
+      else this.streamProc.kill()
       this.streamProc = null
       this.send({ t: 'sessionEnded' })
     }

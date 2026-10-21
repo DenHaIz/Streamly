@@ -6,6 +6,7 @@ import type {
   ClientState,
   DeepPartial,
   DiscoveredHost,
+  HostDisplay,
   HostState,
   RadminStatus,
   Settings,
@@ -20,6 +21,8 @@ export interface BridgeEvents {
   hostState: HostState
   clientState: ClientState
   hosts: DiscoveredHost[]
+  /** Меню Alt+F2 открыто (screens — сколько мониторов у этого ПК). */
+  overlay: { open: boolean; screens: number }
 }
 
 export type BridgeEvent = keyof BridgeEvents
@@ -56,6 +59,8 @@ export interface StreamlyBridge {
     selfCheck(): Promise<CheckReport>
     listTrusted(): Promise<TrustedFriendView[]>
     removeTrusted(deviceId: string): Promise<void>
+    /** Мониторы хоста (по логу Apollo; до первого запуска хоста список пуст). */
+    listDisplays(): Promise<HostDisplay[]>
   }
 
   client: {
@@ -67,6 +72,18 @@ export interface StreamlyBridge {
     diagnose(address: string): Promise<CheckReport>
     cancel(): Promise<void>
     reset(): Promise<void>
+    /** Выключить себе (true) или вернуть клавиатуру, мышь, геймпад. */
+    setSelfOff(patch: Partial<InputPerms>): Promise<void>
+    /** Перезапустить трансляцию с текущими настройками качества. */
+    restartStream(): Promise<boolean>
+  }
+
+  /** Меню во время игры (Alt+F2). */
+  overlay: {
+    /** Закрыть меню и вернуться в игру. */
+    close(): Promise<void>
+    /** Курсор на другой монитор этого ПК (мышь отпускается из окна трансляции). */
+    toOtherScreen(): Promise<boolean>
   }
 
   on<E extends BridgeEvent>(event: E, cb: (payload: BridgeEvents[E]) => void): () => void
@@ -96,13 +113,18 @@ export const IPC = {
   hostSelfCheck: 'host:selfCheck',
   hostListTrusted: 'host:listTrusted',
   hostRemoveTrusted: 'host:removeTrusted',
+  hostListDisplays: 'host:listDisplays',
   clientGetState: 'client:getState',
   clientDiscover: 'client:discover',
   clientGetHosts: 'client:getHosts',
   clientConnect: 'client:connect',
   clientDiagnose: 'client:diagnose',
   clientCancel: 'client:cancel',
-  clientReset: 'client:reset'
+  clientReset: 'client:reset',
+  clientSetSelfOff: 'client:setSelfOff',
+  clientRestartStream: 'client:restartStream',
+  overlayClose: 'overlay:close',
+  overlayOtherScreen: 'overlay:otherScreen'
 } as const
 
 export const EVENT_CHANNEL = 'streamly:event'

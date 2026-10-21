@@ -1,12 +1,14 @@
 // Сквозной сценарий: настоящие HostController и ClientController общаются по WebSocket через loopback,
 // а Apollo и Moonlight заменены имитациями.
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PERM_BASE, toApolloPerm } from '@shared/perms'
+import { PERM, PERM_BASE, toApolloPerm } from '@shared/perms'
 import type { ApolloClient } from '../src/main/services/apollo/api'
-import type { ApolloLike, InstallerLike } from '../src/main/services/host/controller'
+import type { ApolloLike, HostDeps, InstallerLike } from '../src/main/services/host/controller'
+import type { RouterOptions, RouterState } from '../src/main/services/helper/helper'
 import { HostController } from '../src/main/services/host/controller'
 import { ClientController, type MoonlightLike } from '../src/main/services/client/controller'
 import type { MoonlightProcess } from '../src/main/services/moonlight/runner'
@@ -66,6 +68,14 @@ class FakeApollo implements ApolloLike {
     return false
   }
   async restart(): Promise<void> {}
+  closed = 0
+  async getLogs(): Promise<string> {
+    return ''
+  }
+  async closeApp(): Promise<boolean> {
+    this.closed++
+    return true
+  }
 }
 
 function fakeProcess(onKill?: () => void, exitCode?: number, lines: string[] = []): MoonlightProcess {
@@ -89,8 +99,30 @@ function fakeProcess(onKill?: () => void, exitCode?: number, lines: string[] = [
   }
 }
 
+/** Помощник звука: нашёл виртуальные колонки Steam и запоминает, что просил хост. */
+class FakeAudio extends EventEmitter {
+  readonly available = true
+  routerState: RouterState | null = null
+  calls: RouterOptions[] = []
+  async router(opts: RouterOptions): Promise<RouterState> {
+    this.calls.push(opts)
+    this.routerState = {
+      enabled: opts.enabled,
+      virtualFound: true,
+      virtualName: 'Steam Streaming Speakers',
+      active: opts.enabled,
+      monitoring: opts.enabled && opts.monitor,
+      chatExcluded: opts.enabled && opts.excludeChat,
+      error: null
+    }
+    this.emit('router', this.routerState)
+    return this.routerState
+  }
+}
+
 class FakeMoonlight implements MoonlightLike {
   readonly available = true
+  streams = 0
   /** uuid клиента Apollo, с которым сопряжён этот «компьютер». */
   uuid: string | null = null
   pairs = 0
@@ -113,6 +145,7 @@ class FakeMoonlight implements MoonlightLike {
     return fakeProcess(undefined, 0, (c.perm & 0x1000000) !== 0 ? ['Desktop', 'Steam Big Picture'] : ['Permission Denied'])
   }
   stream(): MoonlightProcess {
+    this.streams++
     const c = this.myClient()
     // Подключение устанавливается не мгновенно: проверяем, что хост не пускает два запуска сразу.
     this.apollo.launching++
@@ -163,7 +196,7 @@ const installer: InstallerLike = {
 }
 
 let portSeq = 0
-function setup(maxPlayers = 4) {
+function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
   const port = 47_950 + (portSeq++ % 40)
   const apollo = new FakeApollo()
   const hostSettings = new SettingsService(tmp(), 'ru')
@@ -184,7 +217,8 @@ function setup(maxPlayers = 4) {
     pollMs: 40,
     displayMode: () => ({ width: 1920, height: 1080, fps: 60 }),
     portOpen: async () => true,
-    pairTimeoutMs: 2500
+    pairTimeoutMs: 2500,
+    ...extra
   })
 
   const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number } = {}) => {
@@ -449,4 +483,92 @@ describe('host ↔ client flow', () => {
     expect(service.running).toBe(false)
     service.running = true
   })
+
+  it('a player turns off their own gamepad from the in-game menu', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    const perm = (): number => apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm
+
+    client.setSelfOff({ gamepad: true })
+    await waitFor(() => (perm() & PERM.inputController) === 0)
+    const p = host.getState().players[0]
+    // Хост по-прежнему разрешает геймпад, просто игрок сам его выключил.
+    expect(p.perms.gamepad).toBe(true)
+    expect(p.selfOff.gamepad).toBe(true)
+    expect(perm() & PERM.inputKbd).toBe(PERM.inputKbd)
+
+    client.setSelfOff({ gamepad: false })
+    await waitFor(() => (perm() & PERM.inputController) !== 0)
+  }, 15000)
+
+  it('routes the sound and keeps Discord out of the stream when a player asks', async () => {
+    const audio = new FakeAudio()
+    const { host, makeClient } = setup(4, { audio })
+    cleanups.push(() => host.stop())
+    await host.start()
+    // Хостинг включил маршрутизацию, но Discord пока никто не просил убрать.
+    expect(audio.calls.at(-1)).toEqual({ enabled: true, monitor: true, excludeChat: false })
+    expect(host.getState().audio.chatControl).toBe(true)
+
+    const { client, settings } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    // Звук идёт через виртуальные колонки: Apollo не должен оставлять его на хосте.
+    expect(client.getState().policy?.hostAudio).toBe(false)
+    // По умолчанию игрок просит убрать Discord.
+    await waitFor(() => audio.calls.at(-1)?.excludeChat === true)
+    await waitFor(() => client.getState().hostChat?.excluded === true)
+    expect(host.getState().players[0].muteChat).toBe(true)
+
+    settings.update({ stream: { muteHostChat: false } })
+    client.prefsChanged()
+    await waitFor(() => audio.calls.at(-1)?.excludeChat === false)
+    await waitFor(() => client.getState().hostChat?.excluded === false)
+
+    await host.stop()
+    expect(audio.calls.at(-1)?.enabled).toBe(false)
+  }, 15000)
+
+  it('closes Desktop in Apollo after everyone leaves (removes the virtual monitor)', async () => {
+    const { apollo, host, makeClient } = setup(4, { idleCloseMs: 150 })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    await new Promise((r) => setTimeout(r, 300))
+    const closedAtStart = apollo.closed
+    expect(closedAtStart).toBe(1)
+    await client.cancel()
+    await waitFor(() => apollo.closed > closedAtStart)
+  }, 15000)
+
+  it('restarts the stream with new quality without a new approval', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    expect(client.restartStream()).toBe(true)
+    expect(client.getState().restarting).toBe(true)
+    await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming' && !client.getState().restarting)
+    expect(host.getState().requests).toHaveLength(0)
+  }, 15000)
 })

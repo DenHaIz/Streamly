@@ -8,8 +8,15 @@ export interface MoonlightProcess {
   readonly child: ChildProcess
   readonly exited: Promise<number>
   kill(): void
+  /**
+   * Закрыть окно как крестиком: Moonlight корректно завершает сессию, и хост сразу видит отключение
+   * (при kill Apollo ждёт таймаута). Если процесс не закрылся за несколько секунд — kill.
+   */
+  close?(): void
   /** Строки вывода процесса (stdout и stderr). */
   output?(): string[]
+  /** Подписка на новые строки вывода. */
+  onLine?(cb: (line: string) => void): void
 }
 
 const RES: Record<Exclude<StreamSettings['resolution'], 'auto'>, [number, number]> = {
@@ -107,13 +114,16 @@ export class MoonlightRunner {
   private spawn(args: string[]): MoonlightProcess {
     this.ensureDataDir()
     const run: RunLog = { command: args.slice(0, 2).join(' '), startedAt: Date.now(), lines: [] }
+    const subscribers: Array<(line: string) => void> = []
     this.runs.push(run)
     if (this.runs.length > 6) this.runs.shift()
     const child = spawn(this.exePath, args, { cwd: this.dataDir, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
     // Потоки обязательно читаем, иначе при заполнении буфера Moonlight зависнет на записи.
     const collect = (chunk: Buffer): void => {
       for (const line of chunk.toString('utf8').split(/\r?\n/)) {
-        if (line.trim()) run.lines.push(line)
+        if (!line.trim()) continue
+        run.lines.push(line)
+        for (const cb of subscribers) cb(line)
       }
       if (run.lines.length > MAX_LOG_LINES) run.lines.splice(0, run.lines.length - MAX_LOG_LINES)
     }
@@ -129,13 +139,23 @@ export class MoonlightRunner {
         resolve(-1)
       })
     })
+    const kill = (): void => {
+      if (child.exitCode === null && !child.killed) child.kill()
+    }
     return {
       child,
       exited,
-      kill: () => {
-        if (child.exitCode === null && !child.killed) child.kill()
+      kill,
+      close: () => {
+        if (child.exitCode !== null || child.killed || !child.pid) return
+        // taskkill без /F отправляет окну WM_CLOSE: Moonlight завершает сессию, как по крестику.
+        spawn('taskkill', ['/PID', String(child.pid)], { windowsHide: true, stdio: 'ignore' }).on('error', kill)
+        setTimeout(kill, 4000)
       },
-      output: () => [...run.lines]
+      output: () => [...run.lines],
+      onLine: (cb) => {
+        subscribers.push(cb)
+      }
     }
   }
 

@@ -116,7 +116,21 @@
     "kickAllTitle": "Disconnect everyone?",
     "kickAllConfirm": "All players will be disconnected. Trusted friends can only come back after you accept them.",
     "newDevice": "new device",
-    "newDeviceHint": "This device connects for the first time — make sure it is your friend"
+    "newDeviceHint": "This device connects for the first time — make sure it is your friend",
+    "pendingRestart": "Screen settings changed: they apply when all players leave.",
+    "selfOffHint": "The player turned off their own {{what}}",
+    "poorNetwork": "poor connection",
+    "poorNetworkHint": "The player's Moonlight is losing packets. Lowering the quality (in their Alt+F2 menu) or the bitrate cap helps.",
+    "muteChat": "no Discord",
+    "muteChatHint": "The player asks to keep Discord out of the stream",
+    "audioError": "Could not redirect the sound: {{error}}",
+    "chatExcluded": "Discord is kept out of the stream at the players’ request.",
+    "chatExcludedMonitor": "Discord is kept out of the stream at the players’ request. You hear the game through the virtual speakers.",
+    "chatUnavailable": {
+      "noVirtualSink": "Players ask to remove Discord, but Steam Streaming Speakers are missing. Install Steam and restart \"I'm the host\".",
+      "disabled": "Players ask to remove Discord, but it is turned off in the host settings (\"Keep Discord out of the stream\").",
+      "noHelper": "Players ask to remove Discord, but Streamly's sound module is missing. Reinstall Streamly."
+    }
   },
   "connect": {
     "title": "Connect",
@@ -152,7 +166,9 @@
     "latency": "Latency {{ms}} ms",
     "hostAudio": "Audio also plays on the host",
     "bitrateCap": "Host cap: {{mbps}} Mbps",
-    "firewallHint": "If Windows asks to allow Moonlight, press Allow."
+    "firewallHint": "If Windows asks to allow Moonlight, press Allow.",
+    "jitter": "{{ms}} ms jitter",
+    "overlayHint": "— in-game menu (volume, Discord, second monitor)"
   },
   "errors": {
     "no_radmin": "Not connected to Radmin VPN",
@@ -204,7 +220,7 @@
     "displayMode": "Window mode",
     "displayModes": {
       "fullscreen": "Fullscreen",
-      "borderless": "Borderless window",
+      "borderless": "Borderless full screen",
       "windowed": "Windowed"
     },
     "vsync": "V-Sync",
@@ -224,8 +240,6 @@
     "maxPlayers": "Max players",
     "defaultPerms": "Access for new players",
     "defaultPermsHint": "What a friend gets right after joining. You can change it live.",
-    "virtualDisplay": "Virtual monitor",
-    "virtualDisplayHint": "Stream a separate virtual screen instead of your main one",
     "trustedFriends": "Trusted friends",
     "trustedEmpty": "Nobody yet. Press “Always allow” when a friend joins.",
     "remove": "Remove",
@@ -259,13 +273,41 @@
     "maxBitrateHint": "Limits the host upload traffic. Applies the next time hosting starts",
     "unlimited": "Unlimited",
     "keepHostAudio": "Game audio stays on the host",
-    "keepHostAudioHint": "Needed for playing together: otherwise Apollo may redirect audio and the host will not hear it",
+    "keepHostAudioHint": "Needed for playing together: the host hears the game too. Turn off if only your friends play.",
     "notifyRequests": "Windows notifications about join requests",
     "selfCheck": "Check host",
     "selfCheckHint": "Apollo, ports, firewall, drivers — everything friends need to connect",
     "advanced": "Advanced",
     "bytes": "{{value}} B",
-    "notInstalledBundled": "not installed · bundled"
+    "notInstalledBundled": "not installed · bundled",
+    "inGame": "In game",
+    "volumeHint": "Only for you; the host and other players are not affected",
+    "muteChatHint": "The host removes their Discord from the stream audio, so you don't hear yourself and your friends twice. Applies to all of the host's players.",
+    "overlayKey": "Stream menu",
+    "overlayKeyHint": "Volume, Discord, your own controls, quality and switching to your second monitor",
+    "hostScreen": "Screen",
+    "display": "Monitor to stream",
+    "displayHint": "What your friends see",
+    "displayHintEmpty": "The monitor list appears after the first \"I'm the host\"",
+    "displayPrimary": "Primary monitor",
+    "displayN": "Monitor {{n}}",
+    "displayIsPrimary": "primary",
+    "displayMissing": "Selected monitor (not found right now)",
+    "displayVirtual": "Virtual monitor",
+    "virtualExplain": "Apollo creates a separate screen at the player's resolution. While playing it becomes the primary one: the desktop and taskbar move there, and your monitor becomes the second one. Move the game window to the virtual screen (Win+Shift+arrow). When everyone leaves, your screens go back to how they were.",
+    "virtualOnly": "Turn off my monitors while playing",
+    "virtualOnlyHint": "Friends see the whole desktop, and your monitors stay blank until the game ends",
+    "lossProtection": "Loss protection",
+    "lossProtectionHint": "High adds redundant packets so network losses don't turn into stutters. Traffic grows by about 10%.",
+    "loss": {
+      "normal": "Normal",
+      "high": "High"
+    },
+    "pendingRestart": "Screen changes apply when all players leave (Apollo restarts for a couple of seconds).",
+    "hostSound": "Sound",
+    "chatRouting": "Keep Discord out of the stream",
+    "chatRoutingHint": "When players ask, Discord is left out of the stream audio. Requires Steam Streaming Speakers (present when Steam is installed). You hear the game with about 30 ms delay.",
+    "hz": "{{value}} Hz"
   },
   "errorHints": {
     "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
@@ -315,7 +357,8 @@
       "apolloApi": "Apollo responds",
       "apolloPorts": "Apollo ports open",
       "hosting": "Hosting is on",
-      "audio": "Audio stays on the host"
+      "audio": "Audio stays on the host",
+      "chatRouting": "Discord out of the stream"
     },
     "hints": {
       "radmin": "Start Radmin VPN and join the shared network.",
@@ -336,7 +379,11 @@
       "apolloApi": "Apollo does not respond on this PC. Restart \"Apollo Service\" or restart the PC.",
       "apolloPorts": "Apollo does not listen on the required ports. Another program may use them (Sunshine, Parsec, etc.).",
       "hosting": "Hosting is off — friends cannot connect.",
-      "hostAudio": "The host will not hear the game. Turn on \"Game audio stays on the host\" in settings."
+      "hostAudio": "The host will not hear the game. Turn on \"Game audio stays on the host\" in settings.",
+      "chatRoutingError": "Windows didn't allow redirecting Discord's sound. See the Streamly log for details.",
+      "noVirtualSink": "Steam Streaming Speakers are needed: install Steam and restart \"I'm the host\".",
+      "chatDisabled": "Turned off in the host settings.",
+      "noHelper": "Streamly's sound module is missing: reinstall Streamly."
     },
     "summary": {
       "allGood": "Connection is fine — you can connect",
@@ -353,5 +400,34 @@
       "hostProblems": "There are problems, friends cannot connect",
       "checkFailed": "The check did not run — please try again"
     }
+  },
+  "stream": {
+    "volume": "Stream volume",
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "muteChat": "Don't hear the host's Discord",
+    "chatUnknown": "The host hasn't said yet whether Discord can be removed",
+    "chatUnavailable": "Not available on the host: Steam's virtual speakers are needed (install Steam on the host PC)",
+    "chatIncluded": "The host's Discord is heard in the stream",
+    "chatExcluded": "Discord is removed from the stream: you won't hear yourself",
+    "chatPending": "Discord will be removed from the stream as soon as it starts",
+    "myInput": "My controls",
+    "myInputHint": "Turn off so you don't get in the host's way by accident. Lock — turned off by the host.",
+    "offByHost": "Turned off by the host",
+    "quality": "Quality",
+    "applyHint": "The stream restarts for a few seconds",
+    "apply": "Apply",
+    "restarting": "Restarting the stream…",
+    "poorNetwork": "The connection to the host is losing packets, so the picture may stutter. Lowering the quality helps.",
+    "unstable": "Unstable connection: {{rtt}} ms latency, {{jitter}} ms jitter. Radmin may be using a relay, or the network is busy.",
+    "lowerQuality": "Lower quality"
+  },
+  "overlay": {
+    "title": "Stream menu",
+    "otherScreen": "My second monitor",
+    "otherScreenHint": "The cursor moves to your other monitor. Click the stream window to come back.",
+    "back": "Back to the game",
+    "leaveConfirm": "Really disconnect?",
+    "tip": "Esc or Alt+F2 — back to the game"
   }
 }

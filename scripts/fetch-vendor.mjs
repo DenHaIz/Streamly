@@ -77,8 +77,10 @@ for (const a of ASSETS) {
     const out = join(vendor, a.extractTo)
     rmSync(out, { recursive: true, force: true })
     mkdirSync(out, { recursive: true })
-    // tar из Windows 10+ умеет распаковывать zip.
-    execFileSync('tar', ['-xf', dest, '-C', out], { stdio: 'inherit' })
+    // tar из Windows 10+ (bsdtar) умеет распаковывать zip. Именно его, а не GNU tar из Git Bash:
+    // тот принимает «C:» за имя удалённого хоста и не распаковывает ничего.
+    const winTar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+    execFileSync(existsSync(winTar) ? winTar : 'tar', ['-xf', dest, '-C', out], { stdio: 'inherit' })
     flattenTo(out)
     rmSync(dest, { force: true })
   }

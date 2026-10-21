@@ -23,16 +23,31 @@ export interface StreamSettings {
   captureSystemKeys: CaptureKeys
   /** Курсор «как на рабочем столе» (абсолютная мышь); для игр лучше выключить. */
   absoluteMouse: boolean
+  /** Громкость трансляции у себя, 0–100. */
+  volume: number
+  /** Просить хоста убрать из трансляции Discord (чтобы не слышать свой голос и голоса друзей дважды). */
+  muteHostChat: boolean
 }
+
+/** Какой монитор хоста транслировать: основной, виртуальный или конкретный (id устройства Apollo). */
+export type HostDisplayChoice = 'primary' | 'virtual' | string
+
+export type LossProtection = 'normal' | 'high'
 
 export interface HostSettings {
   maxPlayers: number
   defaultPerms: InputPerms
-  useVirtualDisplay: boolean
+  display: HostDisplayChoice
+  /** Виртуальный монитор: на время игры выключать физические мониторы хоста (друзья видят весь рабочий стол). */
+  virtualOnly: boolean
   /** Потолок битрейта на одного игрока, кбит/с (0 — без ограничения). Apollo кодирует поток каждому отдельно. */
   maxBitrateKbps: number
   /** Звук игры остаётся и на колонках хоста (иначе Apollo может переключить вывод на виртуальное устройство). */
   keepHostAudio: boolean
+  /** Разрешить игрокам убирать Discord из трансляции (нужны виртуальные колонки Steam Streaming Speakers). */
+  chatRouting: boolean
+  /** Доля избыточных пакетов (FEC): «высокая» лучше переживает потери при нескольких игроках. */
+  lossProtection: LossProtection
   /** Уведомлять о запросах на подключение, когда окно Streamly не активно. */
   notifyRequests: boolean
   /** Включать режим хоста сразу при запуске Streamly. */
@@ -43,10 +58,36 @@ export interface HostSettings {
 export interface StreamPolicy {
   hostAudio: boolean
   maxBitrateKbps: number
-  /** Разрешение и частота основного монитора хоста: выше них стримить бессмысленно. */
+  /** Разрешение и частота транслируемого монитора хоста: выше них стримить бессмысленно (0 — без ограничения). */
   hostWidth: number
   hostHeight: number
   hostFps: number
+}
+
+/** Монитор хоста по данным Apollo. */
+export interface HostDisplay {
+  /** id устройства Apollo (output_name). */
+  id: string
+  name: string
+  /** \\.\DISPLAYn */
+  displayName: string
+  primary: boolean
+  width: number
+  height: number
+  fps: number
+}
+
+/** Маршрутизация звука хоста (Discord мимо трансляции). */
+export interface HostAudioState {
+  /** Помощник запущен и нашёл виртуальные колонки: игроки могут убрать Discord. */
+  chatControl: boolean
+  /** Почему недоступно: нет виртуальных колонок, выключено в настройках, нет помощника. */
+  unavailable?: 'noVirtualSink' | 'disabled' | 'noHelper'
+  /** Discord сейчас убран из трансляции. */
+  chatExcluded: boolean
+  /** Хост слышит игру через повтор виртуальных колонок. */
+  monitoring: boolean
+  error?: string
 }
 
 export interface RecentHost {
@@ -56,6 +97,8 @@ export interface RecentHost {
 }
 
 export interface Settings {
+  /** Версия формата настроек (для переноса старых значений). */
+  schema: number
   onboarded: boolean
   language: Lang
   theme: ThemePref
@@ -71,7 +114,10 @@ export interface Settings {
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
 
+export const SETTINGS_SCHEMA = 2
+
 export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'language'> = {
+  schema: SETTINGS_SCHEMA,
   onboarded: false,
   theme: 'system',
   autostart: false,
@@ -81,20 +127,26 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     fps: 60,
     bitrateKbps: 0,
     codec: 'auto',
-    displayMode: 'fullscreen',
+    // «Без рамки» вместо эксклюзивного полного экрана: меню Alt+F2 и второй монитор работают без мигания.
+    displayMode: 'borderless',
     vsync: false,
     framePacing: false,
     perfOverlay: false,
     packetSize: 0,
     captureSystemKeys: 'fullscreen',
-    absoluteMouse: true
+    absoluteMouse: true,
+    volume: 100,
+    muteHostChat: true
   },
   host: {
     maxPlayers: 4,
     defaultPerms: { keyboard: true, mouse: true, gamepad: true },
-    useVirtualDisplay: false,
+    display: 'primary',
+    virtualOnly: false,
     maxBitrateKbps: 20000,
     keepHostAudio: true,
+    chatRouting: true,
+    lossProtection: 'high',
     notifyRequests: true,
     autoStartHosting: false
   },
@@ -158,6 +210,12 @@ export interface PlayerView {
   since: number
   /** Задержка до игрока по сети (мс), измеряется по сигнальному соединению. */
   rttMs?: number
+  /** Что игрок выключил себе сам (из меню Alt+F2). */
+  selfOff: InputPerms
+  /** Игрок просит убрать Discord из трансляции. */
+  muteChat: boolean
+  /** Moonlight у игрока сообщает о плохой связи. */
+  poorNetwork: boolean
 }
 
 export interface JoinRequestView {
@@ -181,6 +239,9 @@ export interface HostState {
   requests: JoinRequestView[]
   /** Установлен ли драйвер виртуальных геймпадов (ViGEmBus). */
   gamepadDriver: boolean
+  audio: HostAudioState
+  /** Настройки монитора или защиты от потерь поменялись во время игры: применятся, когда все отключатся. */
+  pendingRestart: boolean
 }
 
 export interface TrustedFriendView {
@@ -211,7 +272,17 @@ export interface ClientState {
   startedAt?: number
   /** Задержка до хоста (мс). */
   rttMs?: number
+  /** Разброс задержки (мс): большой — признак ретранслятора Radmin или перегруженной сети. */
+  jitterMs?: number
   policy?: StreamPolicy
+  /** Что игрок выключил себе сам. */
+  selfOff?: InputPerms
+  /** Может ли хост убрать Discord из трансляции и убран ли он сейчас. */
+  hostChat?: { control: boolean; excluded: boolean }
+  /** Moonlight сообщает о плохой связи (потери пакетов). */
+  poorNetwork?: boolean
+  /** Трансляция перезапускается с новыми настройками качества. */
+  restarting?: boolean
 }
 
 // ---------- Проверка связи ----------

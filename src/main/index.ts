@@ -1,11 +1,27 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, safeStorage, screen, shell, Tray, type IpcMainInvokeEvent } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  Notification,
+  safeStorage,
+  screen,
+  shell,
+  Tray,
+  type IpcMainInvokeEvent
+} from 'electron'
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision } from '@shared/ipc'
 import type { InputPerms } from '@shared/perms'
-import type { ClientState, DeepPartial, HostState, RadminStatus, Settings } from '@shared/types'
+import type { ClientState, DeepPartial, HostDisplay, HostState, RadminStatus, Settings } from '@shared/types'
 import { SecretsService, SettingsService } from './settings'
-import type { Cipher } from './store'
+import { JsonFile, type Cipher } from './store'
+import { Helper } from './services/helper/helper'
 import { ApolloApi } from './services/apollo/api'
 import { ApolloInstaller } from './services/apollo/installer'
 import { HostController } from './services/host/controller'
@@ -83,8 +99,29 @@ function showWindow(): void {
   win.focus()
 }
 
+/** Меню во время игры (Alt+F2): прозрачное окно поверх трансляции. */
+let overlay: BrowserWindow | null = null
+const OVERLAY_KEY = 'Alt+F2'
+
 function broadcast<E extends BridgeEvent>(event: E, payload: BridgeEvents[E]): void {
   win?.webContents.send(EVENT_CHANNEL, event, payload)
+  if (overlay && !overlay.isDestroyed()) overlay.webContents.send(EVENT_CHANNEL, event, payload)
+}
+
+/** Окна Streamly грузят один и тот же интерфейс; меню отличается только адресом (#overlay). */
+function loadRenderer(w: BrowserWindow, hash?: string): void {
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void w.loadURL(process.env.ELECTRON_RENDERER_URL + (hash ? `#${hash}` : ''))
+  } else {
+    void w.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined)
+  }
+}
+
+function lockDown(w: BrowserWindow): void {
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  w.webContents.on('will-navigate', (e) => e.preventDefault())
+  w.webContents.on('will-redirect', (e) => e.preventDefault())
+  w.webContents.on('will-attach-webview', (e) => e.preventDefault())
 }
 
 const DARK_BG = '#0e1015'
@@ -113,16 +150,39 @@ function createWindow(settings: Settings): void {
   win.once('ready-to-show', () => {
     if (!startHidden) win?.show()
   })
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.webContents.on('will-navigate', (e) => e.preventDefault())
-  win.webContents.on('will-redirect', (e) => e.preventDefault())
-  win.webContents.on('will-attach-webview', (e) => e.preventDefault())
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  lockDown(win)
+  loadRenderer(win)
   win.on('closed', () => (win = null))
+}
+
+function createOverlay(): BrowserWindow {
+  const o = new BrowserWindow({
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    title: 'Streamly',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+  // Уровень выше полноэкранных окон: меню видно поверх Moonlight.
+  o.setAlwaysOnTop(true, 'screen-saver')
+  lockDown(o)
+  loadRenderer(o, 'overlay')
+  o.on('closed', () => (overlay = null))
+  return o
 }
 
 void app.whenReady().then(() => {
@@ -138,6 +198,7 @@ void app.whenReady().then(() => {
 
   const installer = new ApolloInstaller(join(vendorDir, 'apollo', 'Apollo-setup.exe'), process.execPath, expectedApolloHash())
   const apollo = new ApolloApi(() => secrets.get().apollo)
+  const helper = new Helper(join(vendorDir, 'helper', 'StreamlyHelper.exe'), log)
   const host = new HostController({
     settings,
     secrets,
@@ -151,6 +212,14 @@ void app.whenReady().then(() => {
       return { width: Math.round(d.size.width * d.scaleFactor), height: Math.round(d.size.height * d.scaleFactor), fps: Math.round(d.displayFrequency || 60) }
     },
     portOpen: async (h, p) => (await probePort(h, p, 1500)) === 'open',
+    audio: helper,
+    displaysCache: (() => {
+      const file = new JsonFile<{ list: HostDisplay[] }>(join(dataDir, 'displays.json'), () => ({ list: [] }))
+      return {
+        get: () => (Array.isArray(file.get().list) ? file.get().list : []),
+        set: (list: HostDisplay[]) => file.set({ list })
+      }
+    })(),
     log
   })
 
@@ -195,10 +264,80 @@ void app.whenReady().then(() => {
     log(`[client] ${s.phase} host=${s.host?.address ?? '-'}${s.error ? ` error=${s.error}` : ''}${s.errorDetail ? ` (${s.errorDetail})` : ''}`)
   })
   client.on('hosts', (h) => broadcast('hosts', h))
+  let prevSettings = settings.get()
   settings.on('change', (s: Settings) => {
     broadcast('settings', s)
     app.setLoginItemSettings({ openAtLogin: s.autostart, args: ['--hidden'] })
+    if (s.stream.volume !== prevSettings.stream.volume) applyVolume()
+    if (s.stream.muteHostChat !== prevSettings.stream.muteHostChat) client.prefsChanged()
+    prevSettings = s
+    host.onSettingsChanged()
   })
+
+  // ---------- Громкость трансляции: звуковая сессия Moonlight появляется через несколько секунд после запуска ----------
+  let volumeTimer: NodeJS.Timeout | null = null
+  const applyVolume = (attempt = 0): void => {
+    if (volumeTimer) clearTimeout(volumeTimer)
+    volumeTimer = null
+    const pid = client.streamPid
+    if (!pid || !helper.available) return
+    helper
+      .setVolume(pid, settings.get().stream.volume / 100)
+      .then((found) => {
+        if (found === 0 && attempt < 30) volumeTimer = setTimeout(() => applyVolume(attempt + 1), 1500)
+      })
+      .catch((e: unknown) => log('[helper] volume failed', e instanceof Error ? e.message : e))
+  }
+  client.on('streamProcess', () => {
+    applyVolume()
+    // Меню создаём заранее, чтобы по Alt+F2 оно открывалось сразу.
+    overlay ??= createOverlay()
+  })
+
+  // ---------- Меню во время игры (Alt+F2) ----------
+  const overlayPayload = (open: boolean): BridgeEvents['overlay'] => ({ open, screens: screen.getAllDisplays().length })
+  const showOverlay = async (): Promise<void> => {
+    const pid = client.streamPid
+    if (!pid) return
+    // Меню открывается на том мониторе, где окно трансляции.
+    let bounds = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds
+    const rect = helper.available ? await helper.windowRect(pid).catch(() => null) : null
+    if (rect && rect.width > 0) bounds = screen.getDisplayMatching(screen.screenToDipRect(null, rect)).bounds
+    overlay ??= createOverlay()
+    const o = overlay
+    o.setBounds(bounds)
+    o.show()
+    o.focus()
+    o.webContents.send(EVENT_CHANNEL, 'overlay', overlayPayload(true))
+    // Ушли в другое окно (Alt+Tab, клик на другом мониторе): меню закрывается само.
+    o.once('blur', () => hideOverlay(false))
+  }
+  const hideOverlay = (backToGame: boolean): void => {
+    const o = overlay
+    if (!o || o.isDestroyed() || !o.isVisible()) return
+    o.webContents.send(EVENT_CHANNEL, 'overlay', overlayPayload(false))
+    o.removeAllListeners('blur')
+    o.hide()
+    const pid = client.streamPid
+    if (backToGame && pid && helper.available) void helper.focus(pid).catch(() => undefined)
+  }
+  const toggleOverlay = (): void => {
+    if (overlay?.isVisible()) hideOverlay(true)
+    else void showOverlay().catch((e: unknown) => log('[overlay] show failed', e))
+  }
+  let shortcutOn = false
+  const syncShortcut = (s: ClientState): void => {
+    const want = s.phase === 'streaming' || s.phase === 'launching'
+    if (want && !shortcutOn) {
+      shortcutOn = globalShortcut.register(OVERLAY_KEY, toggleOverlay)
+      if (!shortcutOn) log(`[overlay] ${OVERLAY_KEY} is taken by another program`)
+    } else if (!want && shortcutOn) {
+      globalShortcut.unregister(OVERLAY_KEY)
+      shortcutOn = false
+    }
+    if (s.phase !== 'streaming' && !s.restarting) hideOverlay(false)
+  }
+  client.on('state', syncShortcut)
 
   // ---------- Трей: Streamly продолжает хостить или держать стрим, когда окно закрыто ----------
   const updateTray = (): void => {
@@ -308,6 +447,7 @@ void app.whenReady().then(() => {
   handle(IPC.hostSelfCheck, () => host.selfCheck())
   handle(IPC.hostListTrusted, () => host.listTrusted())
   handle(IPC.hostRemoveTrusted, (id: string) => host.removeTrusted(id))
+  handle(IPC.hostListDisplays, () => host.listDisplays())
 
   handle(IPC.clientGetState, () => client.getState())
   handle(IPC.clientDiscover, () => client.discover())
@@ -322,6 +462,22 @@ void app.whenReady().then(() => {
   })
   handle(IPC.clientCancel, () => client.cancel())
   handle(IPC.clientReset, () => client.reset())
+  handle(IPC.clientSetSelfOff, (patch: Partial<InputPerms>) => {
+    const clean: Partial<InputPerms> = {}
+    for (const k of ['keyboard', 'mouse', 'gamepad'] as const) if (typeof patch?.[k] === 'boolean') clean[k] = patch[k]
+    client.setSelfOff(clean)
+  })
+  handle(IPC.clientRestartStream, () => client.restartStream())
+  handle(IPC.overlayClose, () => hideOverlay(true))
+  handle(IPC.overlayOtherScreen, async () => {
+    const pid = client.streamPid
+    if (!pid || !helper.available) return false
+    // Сначала курсор и фокус уходят на другой монитор (пока меню активно, Windows разрешает сменить окно),
+    // потом меню прячется. Наоборот нельзя: скрытое меню вернуло бы фокус Moonlight, и он снова захватил бы мышь.
+    const moved = await helper.cursorToOtherScreen(pid).catch(() => false)
+    hideOverlay(false)
+    return moved
+  })
 
   createWindow(settings.get())
   // Крестик: если идёт хостинг или трансляция, по умолчанию прячем окно в трей, а не выходим.
@@ -349,7 +505,12 @@ void app.whenReady().then(() => {
     if (quitting) return
     e.preventDefault()
     quitting = true
-    void Promise.race([Promise.all([host.stop(), client.cancel()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => app.exit(0))
+    globalShortcut.unregisterAll()
+    void Promise.race([Promise.all([host.stop(), client.cancel()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => {
+      // Помощник возвращает маршрутизацию звука и выходит, когда закрывается его ввод.
+      helper.stop()
+      app.exit(0)
+    })
   })
 })
 

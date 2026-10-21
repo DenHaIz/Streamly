@@ -1,7 +1,8 @@
 // Фейковый API основного процесса для разработки интерфейса в браузере (npm run dev:web).
 // Имитирует хост с входящими запросами и клиент с поиском и подключением.
 import type { BridgeEvent, BridgeEvents, StreamlyBridge } from '@shared/ipc'
-import type { ClientState, DiscoveredHost, HostState, Settings, TrustedFriendView } from '@shared/types'
+import type { ClientState, DiscoveredHost, HostDisplay, HostState, Settings, TrustedFriendView } from '@shared/types'
+import { NO_INPUT } from '@shared/perms'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { MotionGlobalConfig } from 'framer-motion'
 
@@ -23,8 +24,35 @@ let settings: Settings = {
 }
 const radmin = params.get('radmin') === '0' ? { installed: true, connected: false } : { installed: true, connected: true, ip: '26.14.88.201', adapterName: 'Radmin VPN' }
 
-let host: HostState = { phase: 'idle', hostName: settings.nickname, maxPlayers: 4, players: [], requests: [], gamepadDriver: true, address: radmin.ip }
-let client: ClientState = { phase: 'idle' }
+let host: HostState = {
+  phase: 'idle',
+  hostName: settings.nickname,
+  maxPlayers: 4,
+  players: [],
+  requests: [],
+  gamepadDriver: true,
+  address: radmin.ip,
+  audio: { chatControl: true, chatExcluded: false, monitoring: false },
+  pendingRestart: false
+}
+const displays: HostDisplay[] = [
+  { id: '{de9bb7e2-186e-505b-9e93-f48793333810}', name: 'ROG PG279Q', displayName: '\\\\.\\DISPLAY1', primary: true, width: 2560, height: 1440, fps: 165 },
+  { id: '{a1b2c3d4-0000-4000-8000-000000000002}', name: 'DELL U2419H', displayName: '\\\\.\\DISPLAY2', primary: false, width: 1920, height: 1080, fps: 60 }
+]
+// ?stream=1 — сразу «идёт трансляция» (и меню Alt+F2 по адресу #overlay).
+const streamingDemo: ClientState = {
+  phase: 'streaming',
+  host: { address: '26.51.7.12', name: 'Дима' },
+  perms: { keyboard: true, mouse: true, gamepad: false },
+  selfOff: { ...NO_INPUT },
+  rttMs: 31,
+  jitterMs: params.get('poor') === '1' ? 34 : 3,
+  poorNetwork: params.get('poor') === '1',
+  hostChat: { control: params.get('nochat') !== '1', excluded: true },
+  startedAt: Date.now() - 754_000,
+  policy: { hostAudio: false, maxBitrateKbps: 20000, hostWidth: 2560, hostHeight: 1440, hostFps: 165 }
+}
+let client: ClientState = params.get('stream') === '1' || location.hash === '#overlay' ? streamingDemo : { phase: 'idle' }
 let hosts: DiscoveredHost[] = []
 const trusted: TrustedFriendView[] = [{ deviceId: 't1', nickname: 'Дима', addedAt: Date.now() - 86400e3, lastSeen: Date.now() - 3600e3 }]
 
@@ -100,13 +128,29 @@ const bridge: StreamlyBridge = {
       setHost({
         players: [
           ...host.players,
-          { deviceId: r.deviceId, nickname: r.nickname, address: r.address, status: 'pairing', perms: { ...settings.host.defaultPerms }, trusted: d === 'trust', since: Date.now(), rttMs: 18 + host.players.length * 37 }
+          {
+            deviceId: r.deviceId,
+            nickname: r.nickname,
+            address: r.address,
+            status: 'pairing',
+            perms: { ...settings.host.defaultPerms },
+            trusted: d === 'trust',
+            since: Date.now(),
+            rttMs: 18 + host.players.length * 37,
+            // Для наглядности: второй игрок выключил себе геймпад, третий жалуется на связь.
+            selfOff: host.players.length === 1 ? { ...NO_INPUT, gamepad: true } : { ...NO_INPUT },
+            muteChat: host.players.length % 2 === 0,
+            poorNetwork: host.players.length === 2
+          }
         ]
       })
       await wait(1500)
       setHost({ players: host.players.map((p) => (p.deviceId === r.deviceId ? { ...p, status: 'connecting' } : p)) })
       await wait(1500)
-      setHost({ players: host.players.map((p) => (p.deviceId === r.deviceId ? { ...p, status: 'streaming' } : p)) })
+      setHost({
+        players: host.players.map((p) => (p.deviceId === r.deviceId ? { ...p, status: 'streaming' } : p)),
+        audio: { ...host.audio, chatExcluded: host.players.some((p) => p.muteChat), monitoring: true }
+      })
     },
     async setPerms(id, perms) {
       setHost({ players: host.players.map((p) => (p.deviceId === id ? { ...p, perms: { ...p.perms, ...perms } } : p)) })
@@ -147,7 +191,8 @@ const bridge: StreamlyBridge = {
         trusted.findIndex((t) => t.deviceId === id),
         1
       )
-    }
+    },
+    listDisplays: async () => displays
   },
   client: {
     getState: async () => client,
@@ -204,7 +249,23 @@ const bridge: StreamlyBridge = {
     },
     async reset() {
       setClient({ phase: 'idle', error: undefined })
+    },
+    async setSelfOff(patch) {
+      setClient({ selfOff: { ...(client.selfOff ?? NO_INPUT), ...patch } })
+    },
+    async restartStream() {
+      setClient({ restarting: true })
+      await wait(2500)
+      setClient({ restarting: false, poorNetwork: false, jitterMs: 3 })
+      return true
     }
+  },
+  overlay: {
+    async close() {
+      emit('overlay', { open: false, screens: 2 })
+      setTimeout(() => emit('overlay', { open: true, screens: 2 }), 1200)
+    },
+    toOtherScreen: async () => true
   },
   on(event, cb) {
     let set = listeners.get(event)
@@ -216,3 +277,6 @@ const bridge: StreamlyBridge = {
 }
 
 window.streamly = bridge
+
+// В браузере меню Alt+F2 открыто сразу.
+if (location.hash === '#overlay') setTimeout(() => emit('overlay', { open: true, screens: 2 }), 50)

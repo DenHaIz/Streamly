@@ -21,6 +21,10 @@ export type ClientMessage =
   | { t: 'sessionEnded' }
   /** ts — время отправки у клиента, хост возвращает его в pong для замера задержки. */
   | { t: 'ping'; ts?: number }
+  /** Пожелания игрока: убрать Discord из трансляции, что он выключил себе сам (клавиатура, мышь, геймпад). */
+  | { t: 'prefs'; muteChat: boolean; selfOff: InputPerms }
+  /** Moonlight у игрока сообщает о плохой (или снова нормальной) связи. */
+  | { t: 'netStatus'; poor: boolean }
 
 export type HostMessage =
   | { t: 'hostInfo'; v: number; hostName: string; slotsUsed: number; maxSlots: number }
@@ -41,6 +45,8 @@ export type HostMessage =
   | { t: 'kicked' }
   | { t: 'hostStopping' }
   | { t: 'pong'; ts?: number }
+  /** chatControl: хост может убрать Discord из трансляции; chatExcluded: убран сейчас. */
+  | { t: 'audioState'; chatControl: boolean; chatExcluded: boolean }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -52,7 +58,18 @@ export interface DiscoveryReply {
   port: number
 }
 
-const CLIENT_TYPES = new Set(['hello', 'joinRequest', 'pairRequest', 'pairSpawned', 'launchRequest', 'sessionStarted', 'sessionEnded', 'ping'])
+const CLIENT_TYPES = new Set([
+  'hello',
+  'joinRequest',
+  'pairRequest',
+  'pairSpawned',
+  'launchRequest',
+  'sessionStarted',
+  'sessionEnded',
+  'ping',
+  'prefs',
+  'netStatus'
+])
 const HOST_TYPES = new Set([
   'hostInfo',
   'joinAccepted',
@@ -64,7 +81,8 @@ const HOST_TYPES = new Set([
   'kicked',
   'hostStopping',
   'sessionState',
-  'pong'
+  'pong',
+  'audioState'
 ])
 
 const MAX_MESSAGE = 4096
@@ -95,6 +113,8 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
     if (typeof m.v !== 'number' || !isDeviceId(m.deviceId) || !str(m.nickname, 32) || !str(m.appVersion, 32)) return null
     if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
   }
+  if (m.t === 'prefs' && (typeof m.muteChat !== 'boolean' || !isPerms(m.selfOff))) return null
+  if (m.t === 'netStatus' && typeof m.poor !== 'boolean') return null
   return m as unknown as ClientMessage
 }
 
@@ -140,6 +160,9 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
       break
     case 'sessionState':
       if (typeof m.streaming !== 'boolean') return null
+      break
+    case 'audioState':
+      if (typeof m.chatControl !== 'boolean' || typeof m.chatExcluded !== 'boolean') return null
       break
   }
   return m as unknown as HostMessage

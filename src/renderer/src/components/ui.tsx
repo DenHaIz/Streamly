@@ -64,6 +64,42 @@ export function Switch({ checked, onChange, disabled, label }: { checked: boolea
   )
 }
 
+/** Ползунок: заполненная часть подсвечена акцентом (CSS-переменная --fill). */
+export function Slider({
+  value,
+  onChange,
+  min = 0,
+  max = 100,
+  step = 1,
+  label,
+  disabled
+}: {
+  value: number
+  onChange: (v: number) => void
+  min?: number
+  max?: number
+  step?: number
+  label?: string
+  disabled?: boolean
+}) {
+  const rowLabel = useContext(RowLabel)
+  const fill = ((value - min) / (max - min)) * 100
+  return (
+    <input
+      type="range"
+      className="slider"
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      disabled={disabled}
+      aria-label={label ?? rowLabel}
+      style={{ ['--fill' as string]: `${fill}%` }}
+      onChange={(e) => onChange(Number(e.target.value))}
+    />
+  )
+}
+
 export function Segmented<T extends string>({
   value,
   options,

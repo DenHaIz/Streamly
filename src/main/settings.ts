@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { sanitizeNickname } from '@shared/protocol'
-import { DEFAULT_SETTINGS, type DeepPartial, type Settings } from '@shared/types'
+import { DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type Settings } from '@shared/types'
 import { deepMerge, JsonFile, type Cipher } from './store'
 import type { InputPerms } from '@shared/perms'
 
@@ -20,11 +20,19 @@ function normalizePerms(p: Partial<InputPerms> | undefined, fb: InputPerms): Inp
   return { keyboard: bool(p?.keyboard, fb.keyboard), mouse: bool(p?.mouse, fb.mouse), gamepad: bool(p?.gamepad, fb.gamepad) }
 }
 
+export const isDisplayId = (v: unknown): v is string => typeof v === 'string' && /^\{[0-9a-fA-F-]{36}\}$/.test(v)
+
 /** Приводит настройки к допустимым значениям (данные приходят из renderer и с диска). */
 export function normalizeSettings(s: Settings): Settings {
   const d = DEFAULT_SETTINGS
   const st = s.stream
+  // Версия 1: эксклюзивный полный экран мешал меню Alt+F2, виртуальный монитор был переключателем.
+  const v1 = !(Number(s.schema) >= 2)
+  const displayMode = v1 && st?.displayMode === 'fullscreen' ? 'borderless' : st?.displayMode
+  const legacyVirtual = (s.host as { useVirtualDisplay?: unknown } | undefined)?.useVirtualDisplay === true
+  const display = typeof s.host?.display === 'string' ? s.host.display : legacyVirtual ? 'virtual' : d.host.display
   return {
+    schema: SETTINGS_SCHEMA,
     onboarded: bool(s.onboarded, false),
     language: oneOf(s.language, ['ru', 'en'] as const, 'ru'),
     theme: oneOf(s.theme, ['system', 'light', 'dark'] as const, 'system'),
@@ -37,20 +45,26 @@ export function normalizeSettings(s: Settings): Settings {
       fps: FPS_OPTIONS.includes(Number(st?.fps)) ? Number(st.fps) : d.stream.fps,
       bitrateKbps: st?.bitrateKbps === 0 ? 0 : clampInt(st?.bitrateKbps, 500, 150000, 0),
       codec: oneOf(st?.codec, ['auto', 'H.264', 'HEVC', 'AV1'] as const, d.stream.codec),
-      displayMode: oneOf(st?.displayMode, ['fullscreen', 'borderless', 'windowed'] as const, d.stream.displayMode),
+      displayMode: oneOf(displayMode, ['fullscreen', 'borderless', 'windowed'] as const, d.stream.displayMode),
       vsync: bool(st?.vsync, d.stream.vsync),
       framePacing: bool(st?.framePacing, d.stream.framePacing),
       perfOverlay: bool(st?.perfOverlay, d.stream.perfOverlay),
       packetSize: st?.packetSize === 0 ? 0 : clampInt(st?.packetSize, 1024, 1500, 0),
       captureSystemKeys: oneOf(st?.captureSystemKeys, ['never', 'fullscreen', 'always'] as const, d.stream.captureSystemKeys),
-      absoluteMouse: bool(st?.absoluteMouse, d.stream.absoluteMouse)
+      absoluteMouse: bool(st?.absoluteMouse, d.stream.absoluteMouse),
+      volume: clampInt(st?.volume, 0, 100, d.stream.volume),
+      muteHostChat: bool(st?.muteHostChat, d.stream.muteHostChat)
     },
     host: {
       maxPlayers: clampInt(s.host?.maxPlayers, 1, 4, d.host.maxPlayers),
       defaultPerms: normalizePerms(s.host?.defaultPerms, d.host.defaultPerms),
-      useVirtualDisplay: bool(s.host?.useVirtualDisplay, d.host.useVirtualDisplay),
+      // id монитора в Apollo — GUID в фигурных скобках.
+      display: display === 'primary' || display === 'virtual' || isDisplayId(display) ? display : d.host.display,
+      virtualOnly: bool(s.host?.virtualOnly, d.host.virtualOnly),
       maxBitrateKbps: s.host?.maxBitrateKbps === 0 ? 0 : clampInt(s.host?.maxBitrateKbps, 2000, 150000, d.host.maxBitrateKbps),
       keepHostAudio: bool(s.host?.keepHostAudio, d.host.keepHostAudio),
+      chatRouting: bool(s.host?.chatRouting, d.host.chatRouting),
+      lossProtection: oneOf(s.host?.lossProtection, ['normal', 'high'] as const, d.host.lossProtection),
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
       autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting)
     },

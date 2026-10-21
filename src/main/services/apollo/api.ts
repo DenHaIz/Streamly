@@ -224,12 +224,39 @@ export class ApolloApi {
   patchConfig(patch: Record<string, string>): Promise<boolean> {
     return this.exclusive(async () => {
       const current = ApolloApi.stripConfig(await this.callNow<Record<string, unknown>>('GET', '/api/config'))
-      const changed = Object.entries(patch).some(([k, v]) => current[k] !== v)
+      // Пустое значение — «по умолчанию»: ключ убирается из файла (GET его и так не возвращает).
+      const changed = Object.entries(patch).some(([k, v]) => (current[k] ?? '') !== v)
       if (!changed) return false
-      await this.callNow('POST', '/api/config', { ...current, ...patch })
+      const next: Record<string, string> = { ...current }
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === '') delete next[k]
+        else next[k] = v
+      }
+      await this.callNow('POST', '/api/config', next)
       return true
     })
   }
+
+  /** Лог Apollo (текст). В нём при запуске перечислены мониторы с их id. */
+  getLogs(): Promise<string> {
+    return this.exclusive(async () => {
+      if (!this.cookie) await this.loginNow(this.getCredentials())
+      let res = await this.raw('GET', '/api/logs')
+      if (res.status === 401) {
+        await this.loginNow(this.getCredentials())
+        res = await this.raw('GET', '/api/logs')
+      }
+      if (res.status !== 200) throw new ApolloError('http', `/api/logs: ${res.status}`, res.status)
+      return res.body
+    })
+  }
+
+  /** Закрывает запущенное приложение («Desktop»): Apollo убирает виртуальный монитор и возвращает настройки экранов. */
+  async closeApp(): Promise<boolean> {
+    const r = await this.call<{ status?: boolean }>('POST', '/api/apps/close', {})
+    return r.status === true
+  }
+
 
   /** Перезапуск Apollo. Процесс обычно падает до ответа, это нормально. */
   async restart(): Promise<void> {

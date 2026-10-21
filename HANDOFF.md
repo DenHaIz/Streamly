@@ -23,10 +23,11 @@ Streamly ставит и настраивает Apollo, сопрягает Moonl
 
 | | |
 |---|---|
-| Версия в работе | **0.2.0** (в `package.json`), ещё не опубликована |
-| Установщик 0.2.0 | Собран локально: `dist/Streamly Setup 0.2.0.exe`, 157,6 МБ, SHA-256 `ef4236ec4c9fd32a8243cad1274619087b9fddddee980874d50e4f44e95d2fe4` |
-| Последний релиз | **0.1**: https://github.com/DenHaIz/Streamly/releases/tag/v0.1 (тег `v0.1` → `3c68378`) |
-| Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.1.exe (после релиза 0.2 — поменять в INSTALL.md) |
+| Версия | **0.2** (в `package.json` — `0.2.0`) |
+| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.2 (тег `v0.2`) |
+| Установщик | `Streamly-Setup-0.2.exe`, 157,6 МБ, SHA-256 `ef4236ec4c9fd32a8243cad1274619087b9fddddee980874d50e4f44e95d2fe4` |
+| Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.2.exe |
+| Прошлый релиз | 0.1: https://github.com/DenHaIz/Streamly/releases/tag/v0.1 |
 | В комплекте | Apollo 0.4.6 (SHA-256 `42b2aefa…f5021a`), Moonlight-qt 6.2.0 (подпись Cameron Gutman действительна), StreamlyHelper (свой, `native/helper`) |
 | Тесты | 53, все проходят |
 | Реальные ПК | 0.1 проверена на реальных ПК 2026-10-21: замечания исправлены в 0.2 (см. ниже). Сама 0.2 на реальных ПК ещё не проверялась |
@@ -263,4 +264,4 @@ npm 11 блокирует install-скрипты. В `package.json` → `allowSc
 - Режим «локальная сеть без Radmin» (сейчас только через `STREAMLY_DEV_IP` и `STREAMLY_ALLOW`).
 - Подпись установщика сертификатом, чтобы не было предупреждения SmartScreen.
 - Автообновление (electron-updater и GitHub Releases): релизы уже публикуются туда.
-- Скрипт публикации релиза в репозитории (сейчас релиз 0.1 создан вручную через GitHub API).
+- Скрипт публикации релиза в репозитории (сейчас релизы создаются вручную через GitHub API).

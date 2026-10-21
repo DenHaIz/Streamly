@@ -19,6 +19,24 @@ Streamly ставит и настраивает Apollo, сопрягает Moonl
 
 Репозиторий: https://github.com/DenHaIz/Streamly. Коммиты делаются от `DenHaIz <denister173@gmail.com>`, без строк об ИИ-соавторстве.
 
+## Текущее состояние
+
+| | |
+|---|---|
+| Версия | **0.1** (в `package.json` — `0.1.0`) |
+| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.1 |
+| Тег | `v0.1` → коммит `3c68378` |
+| Установщик | `Streamly-Setup-0.1.exe`, 157,5 МБ, SHA-256 `c3b5d63ed52f455e80ff6933702fb1517813c8ab0bd3ba95f88dcdb2d821e494` |
+| Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.1.exe |
+| В комплекте | Apollo 0.4.6 (SHA-256 `42b2aefa…f5021a`), Moonlight-qt 6.2.0 (подпись Cameron Gutman действительна) |
+| Тесты | 39, все проходят |
+| Реальные ПК | Ещё не проверялось на двух-трёх ПК с Radmin — это следующий шаг |
+
+Документы:
+- [README.md](README.md) — обзор, разработка, сборка;
+- [INSTALL.md](INSTALL.md) — короткая инструкция для друзей;
+- этот файл — для того, кто продолжает разработку.
+
 ## Стек и структура
 
 Electron 45, React 19, TypeScript 5.9, Vite 7 и electron-vite 5, Framer Motion, Zustand, i18next, ws, Vitest.
@@ -100,13 +118,23 @@ Electron 45, React 19, TypeScript 5.9, Vite 7 и electron-vite 5, Framer Motion,
 ```bash
 npm install
 npm run fetch-vendor        # Apollo и Moonlight в vendor/ (проверка по vendor.lock.json)
-npm test                    # 35+ тестов
+npm test                    # 39 тестов
 npm run typecheck
 npm run dev:web             # интерфейс в браузере с фейковым API (?lang=en&theme=light&noanim=1&onboarded=0&radmin=0&install=1&fail=1)
 npm run dist                # dist/Streamly Setup x.y.z.exe
 ```
 
 npm 11 блокирует install-скрипты. В `package.json` → `allowScripts` разрешён только esbuild. Electron 45 скачивает свой бинарник при первом запуске.
+
+## Как выпустить новую версию
+
+1. Поднять `version` в `package.json` (electron-builder требует формат `x.y.z`).
+2. Если меняются версии Apollo или Moonlight, поправить ссылки в `scripts/fetch-vendor.mjs` и выполнить `npm run fetch-vendor -- --pin`. Иначе хватит `npm run fetch-vendor`: он сверит файлы с `vendor.lock.json`.
+3. Проверить: `npm run typecheck` и `npm test`.
+4. Собрать: `npm run dist` → `dist/Streamly Setup x.y.z.exe`.
+5. Закоммитить и отправить изменения (от DenHaIz, без строк об ИИ-соавторстве).
+6. Создать релиз на GitHub с тегом `vX.Y` и приложить установщик под именем `Streamly-Setup-X.Y.exe` (без пробелов, чтобы работала прямая ссылка). В описание — что нового, SHA-256 файла и ссылки на исходники Apollo и Moonlight (GPL-3.0).
+7. Обновить ссылку на скачивание в `INSTALL.md` и раздел «Текущее состояние» в этом файле.
 
 ## Зависимости на ПК пользователей
 
@@ -154,11 +182,13 @@ npm 11 блокирует install-скрипты. В `package.json` → `allowSc
 - **Окно сопряжения.** Окно `Moonlight pair` на секунду появляется при первом подключении.
 - **Аварийное завершение.** Если Streamly у хоста упал, но ПК не перезагружался, служба Apollo продолжает работать с правами текущих игроков до следующего запуска Streamly. После перезагрузки Apollo сам не поднимется.
 - **Вход в Apollo.** Apollo держит одну сессию входа, поэтому Streamly вытесняет вход в веб-панель Apollo на хосте.
-- **Лицензия.** В `LICENSE` только уведомление о GPL-3.0. Перед распространением нужно положить полный текст.
+- **Лицензия.** В `LICENSE` только уведомление о GPL-3.0. Релиз уже публичный, поэтому полный текст лицензии стоит добавить в ближайшей версии.
+- **Подпись.** Установщик не подписан: при первом запуске Windows SmartScreen показывает предупреждение (в INSTALL.md написано, как его пройти).
 
 ## Идеи на будущее
 
 - Выбор монитора для трансляции на ПК с несколькими экранами (настройка Apollo `output_name`).
 - Режим «локальная сеть без Radmin» (сейчас только через `STREAMLY_DEV_IP` и `STREAMLY_ALLOW`).
 - Подпись установщика сертификатом, чтобы не было предупреждения SmartScreen.
-- Автообновление (electron-updater и GitHub Releases).
+- Автообновление (electron-updater и GitHub Releases): релизы уже публикуются туда.
+- Скрипт публикации релиза в репозитории (сейчас релиз 0.1 создан вручную через GitHub API).

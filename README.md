@@ -1,6 +1,12 @@
 # Streamly
 
-Простой аналог Parsec для своей компании: один нажимает **«Я хост»**, друзья нажимают **«Подключиться»** и через Radmin VPN попадают на рабочий стол хоста. Одновременно можно подключить до 4 человек. Хост на лету выдаёт и забирает у каждого клавиатуру, мышь и геймпад.
+<p align="center"><img src="resources/icon.png" width="96" alt="Streamly"></p>
+
+**RU.** Streamly — простой аналог Parsec для компании друзей. Один нажимает «Я хост», остальные нажимают «Подключиться» и через Radmin VPN попадают на его рабочий стол. Одновременно можно подключить до 4 человек. Хост на лету выдаёт и отключает каждому клавиатуру, мышь и геймпад. Внутри работают Apollo (форк Sunshine) и Moonlight. Установка, сопряжение и подключение происходят автоматически. Интерфейс на русском и английском, есть светлая и тёмная темы.
+
+**EN.** Streamly is a simple Parsec-like app for a group of friends. One person presses "I'm the host", the others press "Connect" and join the host's desktop over Radmin VPN. Up to 4 players can connect at once. The host can grant or revoke keyboard, mouse and gamepad access for each player on the fly. Under the hood it uses Apollo (a Sunshine fork) and Moonlight. Setup, pairing and connection are automatic. The interface comes in Russian and English, with light and dark themes.
+
+---
 
 Внутри работают готовые открытые проекты:
 - [Apollo](https://github.com/ClassicOldSong/Apollo) (форк Sunshine) на стороне хоста. Он захватывает экран и звук и эмулирует клавиатуру, мышь и геймпады через ViGEmBus. Права у каждого клиента свои.

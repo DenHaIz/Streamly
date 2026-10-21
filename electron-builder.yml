@@ -1,6 +1,6 @@
 appId: com.streamly.app
 productName: Streamly
-copyright: GPL-3.0
+copyright: Copyright © 2026 DenHaIz
 directories:
   output: dist
   buildResources: resources

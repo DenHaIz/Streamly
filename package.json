@@ -46,5 +46,5 @@
     "esbuild@0.25.12": true,
     "esbuild@0.28.2": true
   },
-  "author": "Streamly contributors"
+  "author": "DenHaIz <denister173@gmail.com>"
 }

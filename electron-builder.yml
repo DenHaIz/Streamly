@@ -1,0 +1,35 @@
+appId: com.streamly.app
+productName: Streamly
+copyright: GPL-3.0
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - resources/icon.png
+  - package.json
+extraResources:
+  # Apollo (установщик хоста) и портативный Moonlight; см. scripts/fetch-vendor.mjs
+  - from: vendor
+    to: vendor
+    filter: ['**/*']
+  - from: LICENSE
+    to: LICENSE.txt
+  - from: vendor.lock.json
+    to: vendor.lock.json
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.png
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Streamly
+  installerLanguages: [ru_RU, en_US]
+  language: '1049'
+npmRebuild: false

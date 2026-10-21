@@ -1,0 +1,139 @@
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { APOLLO_APP } from '@shared/protocol'
+import type { StreamSettings } from '@shared/types'
+
+export interface MoonlightProcess {
+  readonly child: ChildProcess
+  readonly exited: Promise<number>
+  kill(): void
+}
+
+/** Аргументы `Moonlight.exe stream`. Разрешение 'auto' подставляется из экрана клиента (native). */
+export function buildStreamArgs(host: string, s: StreamSettings, native?: { width: number; height: number }): string[] {
+  const args = ['stream', host, APOLLO_APP]
+  if (s.resolution === 'auto') {
+    if (native) args.push('--resolution', `${native.width}x${native.height}`)
+  } else {
+    args.push(`--${s.resolution}`)
+  }
+  args.push('--fps', String(s.fps))
+  if (s.bitrateKbps > 0) args.push('--bitrate', String(s.bitrateKbps))
+  if (s.codec !== 'auto') args.push('--video-codec', s.codec)
+  if (s.packetSize > 0) args.push('--packet-size', String(s.packetSize))
+  args.push('--display-mode', s.displayMode)
+  args.push('--capture-system-keys', s.captureSystemKeys)
+  args.push(s.vsync ? '--vsync' : '--no-vsync')
+  args.push(s.framePacing ? '--frame-pacing' : '--no-frame-pacing')
+  args.push(s.perfOverlay ? '--performance-overlay' : '--no-performance-overlay')
+  args.push(s.audioOnHost ? '--audio-on-host' : '--no-audio-on-host')
+  args.push(s.absoluteMouse ? '--absolute-mouse' : '--no-absolute-mouse')
+  // Рабочий стол общий для всех: уход одного игрока не должен закрывать его у остальных.
+  args.push('--no-quit-after', '--no-game-optimization', '--multi-controller', '--keep-awake')
+  return args
+}
+
+/** Последние строки вывода одного запуска Moonlight. */
+interface RunLog {
+  command: string
+  startedAt: number
+  lines: string[]
+}
+
+const MAX_LOG_LINES = 400
+
+/**
+ * Запуск портативного Moonlight-qt. Портативный режим включается файлом portable.dat
+ * в рабочей папке процесса, поэтому все настройки и сертификат сопряжения лежат в dataDir.
+ *
+ * Вывод Moonlight забираем сами (stdout/stderr): при перенаправленном stderr Moonlight
+ * не создаёт свой лог-файл и пишет всё в поток. Последний запуск сохраняется в moonlight-last.log.
+ */
+export class MoonlightRunner {
+  private readonly runs: RunLog[] = []
+
+  constructor(
+    private readonly exePath: string,
+    private readonly dataDir: string
+  ) {}
+
+  get available(): boolean {
+    return existsSync(this.exePath)
+  }
+
+  private ensureDataDir(): void {
+    mkdirSync(this.dataDir, { recursive: true })
+    const marker = join(this.dataDir, 'portable.dat')
+    if (!existsSync(marker)) writeFileSync(marker, '')
+  }
+
+  private spawn(args: string[]): MoonlightProcess {
+    this.ensureDataDir()
+    const run: RunLog = { command: args.slice(0, 2).join(' '), startedAt: Date.now(), lines: [] }
+    this.runs.push(run)
+    if (this.runs.length > 6) this.runs.shift()
+    const child = spawn(this.exePath, args, { cwd: this.dataDir, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
+    // Потоки обязательно читаем, иначе при заполнении буфера Moonlight зависнет на записи.
+    const collect = (chunk: Buffer): void => {
+      for (const line of chunk.toString('utf8').split(/\r?\n/)) {
+        if (line.trim()) run.lines.push(line)
+      }
+      if (run.lines.length > MAX_LOG_LINES) run.lines.splice(0, run.lines.length - MAX_LOG_LINES)
+    }
+    child.stdout?.on('data', collect)
+    child.stderr?.on('data', collect)
+    const exited = new Promise<number>((resolve) => {
+      child.once('exit', (code) => {
+        this.saveLog(run, code)
+        resolve(code ?? -1)
+      })
+      child.once('error', (e) => {
+        run.lines.push(`spawn error: ${e.message}`)
+        resolve(-1)
+      })
+    })
+    return {
+      child,
+      exited,
+      kill: () => {
+        if (child.exitCode === null && !child.killed) child.kill()
+      }
+    }
+  }
+
+  private saveLog(run: RunLog, code: number | null): void {
+    if (run.command.startsWith('list')) return
+    try {
+      const head = `# moonlight ${run.command} · ${new Date(run.startedAt).toISOString()} · exit ${code}`
+      writeFileSync(join(this.dataDir, 'moonlight-last.log'), [head, ...run.lines].join('\n'))
+    } catch {
+      /* лог не критичен */
+    }
+  }
+
+  /** Окно сопряжения Moonlight с заранее известным PIN. Результат определяет хост, процесс закрываем сами. */
+  pair(host: string, pin: string): MoonlightProcess {
+    return this.spawn(['pair', host, '--pin', pin])
+  }
+
+  /** `list` без GUI: код выхода 0 значит, что клиент сопряжён и хост доступен. */
+  list(host: string): MoonlightProcess {
+    return this.spawn(['list', host])
+  }
+
+  /**
+   * Хвост вывода самого свежего запуска pair/stream, начатого после since: строки с ошибками
+   * и предупреждениями (или просто последние строки) — для подробностей в окне ошибки.
+   */
+  logTail(since: number, maxLines = 14): string | undefined {
+    const run = [...this.runs].reverse().find((r) => r.startedAt >= since - 2000 && !r.command.startsWith('list'))
+    if (!run || !run.lines.length) return undefined
+    const important = run.lines.filter((l) => /error|fail|warn|unable|cannot|could not|timed out|refused|denied/i.test(l))
+    return (important.length ? important : run.lines).slice(-maxLines).join('\n')
+  }
+
+  stream(host: string, settings: StreamSettings, native?: { width: number; height: number }): MoonlightProcess {
+    return this.spawn(buildStreamArgs(host, settings, native))
+  }
+}

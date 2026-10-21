@@ -1,0 +1,200 @@
+import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion'
+import { useEffect, useId, useRef, type ReactNode } from 'react'
+
+export const spring = { type: 'spring', stiffness: 520, damping: 34, mass: 0.8 } as const
+export const softSpring = { type: 'spring', stiffness: 260, damping: 28 } as const
+
+type ButtonProps = HTMLMotionProps<'button'> & {
+  variant?: 'default' | 'primary' | 'ghost' | 'danger' | 'success'
+  size?: 'sm' | 'md' | 'lg'
+  icon?: ReactNode
+  loading?: boolean
+}
+
+export function Button({ variant = 'default', size = 'md', icon, loading, children, className = '', disabled, ...rest }: ButtonProps) {
+  const cls = ['btn', variant !== 'default' && `btn-${variant}`, size !== 'md' && `btn-${size}`, className].filter(Boolean).join(' ')
+  return (
+    <motion.button
+      className={cls}
+      whileHover={disabled ? undefined : { y: -1 }}
+      whileTap={disabled ? undefined : { scale: 0.96 }}
+      transition={spring}
+      disabled={disabled || loading}
+      {...rest}
+    >
+      {loading ? <span className="spinner" style={{ width: 16, height: 16 }} /> : icon}
+      {children as ReactNode}
+    </motion.button>
+  )
+}
+
+export function IconButton({ label, children, ...rest }: HTMLMotionProps<'button'> & { label: string }) {
+  return (
+    <motion.button
+      className="btn btn-ghost icon-btn no-drag"
+      aria-label={label}
+      title={label}
+      whileHover={{ scale: 1.06 }}
+      whileTap={{ scale: 0.9 }}
+      transition={spring}
+      {...rest}
+    >
+      {children as ReactNode}
+    </motion.button>
+  )
+}
+
+export function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      className={`switch ${checked ? 'on' : ''}`}
+      onClick={() => onChange(!checked)}
+    >
+      <motion.span className="switch-knob" layout transition={spring} />
+    </button>
+  )
+}
+
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange
+}: {
+  value: T
+  options: { value: T; label: ReactNode }[]
+  onChange: (v: T) => void
+}) {
+  const id = useId()
+  return (
+    <div className="segmented" role="radiogroup">
+      {options.map((o) => (
+        <button key={o.value} type="button" role="radio" aria-checked={o.value === value} className={o.value === value ? 'active' : ''} onClick={() => onChange(o.value)}>
+          {o.value === value && <motion.span layoutId={`seg-${id}`} className="seg-pill" transition={spring} />}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function Select<T extends string | number>({
+  value,
+  options,
+  onChange
+}: {
+  value: T
+  options: { value: T; label: string }[]
+  onChange: (v: T) => void
+}) {
+  return (
+    <select
+      className="select"
+      value={String(value)}
+      onChange={(e) => {
+        const opt = options.find((o) => String(o.value) === e.target.value)
+        if (opt) onChange(opt.value)
+      }}
+    >
+      {options.map((o) => (
+        <option key={String(o.value)} value={String(o.value)}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+export function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <div className="row" role="group" aria-label={typeof title === 'string' ? title : undefined}>
+      <div className="row-text">
+        <div className="row-title">{title}</div>
+        {hint && <div className="row-hint">{hint}</div>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** Аватар с цветом, стабильно вычисленным из ника. */
+export function Avatar({ name, size = 42 }: { name: string; size?: number }) {
+  let h = 0
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360
+  const initials = name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase()
+  return (
+    <div
+      className="avatar"
+      style={{
+        width: size,
+        height: size,
+        flexBasis: size,
+        fontSize: size * 0.38,
+        background: `linear-gradient(135deg, hsl(${h} 75% 60%), hsl(${(h + 40) % 360} 70% 50%))`
+      }}
+    >
+      {initials || '?'}
+    </div>
+  )
+}
+
+export function Modal({ open, onClose, children }: { open: boolean; onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  // Esc закрывает, фокус переходит внутрь окна и возвращается обратно после закрытия.
+  useEffect(() => {
+    if (!open) return
+    const prev = document.activeElement as HTMLElement | null
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') closeRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>('button, input, [tabindex]')?.focus())
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      prev?.focus?.()
+    }
+  }, [open])
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div className="backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
+          <motion.div
+            ref={ref}
+            role="dialog"
+            aria-modal="true"
+            className="modal"
+            initial={{ opacity: 0, scale: 0.94, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={softSpring}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+/** Контейнер для поочерёдного появления дочерних элементов. */
+export const stagger = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.06, delayChildren: 0.04 } }
+}
+
+export const riseIn = {
+  hidden: { opacity: 0, y: 14 },
+  show: { opacity: 1, y: 0, transition: softSpring }
+}

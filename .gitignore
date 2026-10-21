@@ -1,0 +1,7 @@
+node_modules/
+out/
+dist/
+vendor/
+*.log
+.vite/
+.claude/

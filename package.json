@@ -1,0 +1,50 @@
+{
+  "name": "streamly",
+  "productName": "Streamly",
+  "version": "0.1.0",
+  "description": "Простой стриминг рабочего стола для друзей через Radmin VPN (Apollo + Moonlight)",
+  "main": "out/main/index.js",
+  "license": "GPL-3.0-only",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.web.config.ts",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "fetch-vendor": "node scripts/fetch-vendor.mjs",
+    "dist": "npm run build && electron-builder --win nsis",
+    "icon": "node scripts/make-icon.mjs",
+    "pack": "npm run build && electron-builder --win --dir"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "5.0.0",
+    "framer-motion": "^12.23.24",
+    "i18next": "^25.6.0",
+    "lucide-react": "^0.548.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-i18next": "^16.2.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "3.2.7",
+    "zustand": "^5.0.8"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  },
+  "author": "Streamly contributors"
+}

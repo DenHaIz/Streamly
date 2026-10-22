@@ -24,8 +24,8 @@ Streamly ставит и настраивает Apollo, сопрягает Moonl
 | | |
 |---|---|
 | Версия | **0.5.1** (в `package.json` — `0.5.1`) |
-| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.5.1 (тег `v0.5.1` → коммит {{COMMIT}}) |
-| Установщик | `Streamly-Setup-0.5.1.exe`, {{SIZE}}, SHA-256 {{SHA}}. В релизе также `.blockmap` и `latest.yml` для автообновления |
+| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.5.1 (тег `v0.5.1` → коммит `e1303d1`) |
+| Установщик | `Streamly-Setup-0.5.1.exe`, 157,9 МБ, SHA-256 `6f91e9cb5eda2b01c8bd86c67bfa1dcece940099dc8229ea60dbcc3f3832e6d0`. В релизе также `.blockmap` и `latest.yml` для автообновления |
 | Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.5.1.exe (имя файла меняется с каждой версией: при релизе обновлять README и INSTALL) |
 | Прошлые релизы | [0.5](https://github.com/DenHaIz/Streamly/releases/tag/v0.5), [0.4](https://github.com/DenHaIz/Streamly/releases/tag/v0.4), [0.3](https://github.com/DenHaIz/Streamly/releases/tag/v0.3), [0.2](https://github.com/DenHaIz/Streamly/releases/tag/v0.2), [0.1](https://github.com/DenHaIz/Streamly/releases/tag/v0.1) |
 | Под какую систему настроено | Хост с NVIDIA RTX 40/50 и Ryzen (проверочная система разработчика: Ryzen 7 9800X3D + RTX 5070 Ti). Для AMD, Intel и кодирования процессором — ручная настройка |

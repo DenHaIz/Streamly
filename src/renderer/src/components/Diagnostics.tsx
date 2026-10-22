@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import type { CheckReport, CheckStatus } from '@shared/types'
 import { api } from '@/lib/bridge'
 import { useApp } from '@/store/app'
-import { Button, Modal, softSpring } from './ui'
+import { Button, Modal, softSpring, useLastNonNull } from './ui'
 
 const ICON: Record<CheckStatus, typeof CheckCircle2> = { ok: CheckCircle2, warn: TriangleAlert, fail: XCircle, skip: CircleMinus }
 
@@ -14,10 +14,11 @@ const WARN = new Set(['slow', 'hostWarnings'])
 
 /** Окно проверки связи (клиент → хост) или самопроверки хоста. Открывается через useApp().openDiag. */
 export function DiagnosticsModal() {
-  const target = useApp((s) => s.diag)
+  const current = useApp((s) => s.diag)
+  const target = useLastNonNull(current)
   const close = useApp((s) => s.closeDiag)
   return (
-    <Modal open={!!target} onClose={close}>
+    <Modal open={!!current} onClose={close}>
       {target && <DiagnosticsBody key={target.mode === 'client' ? target.address : 'host'} target={target} onClose={close} />}
     </Modal>
   )

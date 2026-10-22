@@ -25,6 +25,8 @@ win:
       arch: [x64]
   icon: resources/icon.png
 nsis:
+  # Имя без пробелов: GitHub заменяет пробелы в именах файлов релиза, и автообновление не нашло бы установщик.
+  artifactName: ${productName}-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -37,3 +39,10 @@ npmRebuild: false
 protocols:
   - name: Streamly invite
     schemes: [streamly]
+# Автообновление: electron-builder кладёт рядом с установщиком latest.yml и .blockmap (загружаются в релиз
+# скриптом scripts/release.mjs), а в приложение — app-update.yml с этим адресом. Публикует не electron-builder (-p never).
+publish:
+  provider: github
+  owner: DenHaIz
+  repo: Streamly
+  releaseType: release

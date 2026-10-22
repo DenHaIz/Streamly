@@ -56,6 +56,8 @@ export type HostMessage =
   | { t: 'inputPaused'; paused: boolean }
   /** Конец замера скорости: сколько байт отправлено (0 — замер сейчас недоступен). */
   | { t: 'speedEnd'; bytes: number }
+  /** Хост просит переподключить геймпады (двойной или зависший геймпад): клиент быстро перезапускает трансляцию. */
+  | { t: 'resetGamepad' }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -96,7 +98,8 @@ const HOST_TYPES = new Set([
   'audioState',
   'inputRequestResult',
   'inputPaused',
-  'speedEnd'
+  'speedEnd',
+  'resetGamepad'
 ])
 
 const MAX_MESSAGE = 4096
@@ -214,9 +217,22 @@ export function parseDiscoveryReply(raw: Uint8Array | string): DiscoveryReply | 
   }
 }
 
+/** Версия a не ниже b (x.y.z). */
+export function versionAtLeast(a: string | undefined, b: string): boolean {
+  if (!a) return false
+  const pa = a.split(/[.-]/).map((n) => parseInt(n, 10) || 0)
+  const pb = b.split(/[.-]/).map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0)
+  return true
+}
+
 /** Ник в безопасном для отображения и для имени клиента Apollo виде. */
 export function sanitizeNickname(name: string): string {
-  const clean = name.replace(/[\u0000-\u001f\u007f<>"'`\\]/g, '').trim().slice(0, 24)
+  const clean = name
+    .replace(/[\u0000-\u001f\u007f<>"'`\\]/g, '')
+    .replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
+    .trim()
+    .slice(0, 24)
   return clean || 'Player'
 }
 

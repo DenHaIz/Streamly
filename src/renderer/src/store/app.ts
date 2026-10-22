@@ -1,7 +1,10 @@
 import { create } from 'zustand'
-import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, Invite, RadminStatus, Settings } from '@shared/types'
+import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, Invite, RadminStatus, Settings, UpdateState } from '@shared/types'
 import { api } from '@/lib/bridge'
 import { setLanguage } from '@/i18n'
+import { playChime } from '@/lib/sound'
+
+export type SettingsTab = 'general' | 'stream' | 'host' | 'about'
 
 export type Screen = 'onboarding' | 'home' | 'host' | 'connect' | 'settings'
 
@@ -34,6 +37,12 @@ interface AppStore {
   overlay: { open: boolean; screens: number }
   /** Приглашение, которое предлагаем принять. */
   invite: Invite | null
+  update: UpdateState | null
+  /** Баннер обновления закрыт кнопкой «Позже» (до перезапуска Streamly). */
+  updateDismissed: boolean
+  dismissUpdate(): void
+  settingsTab: SettingsTab
+  setSettingsTab(tab: SettingsTab): void
   setInvite(invite: Invite | null): void
   toasts: Toast[]
   init(): Promise<void>
@@ -60,6 +69,11 @@ export const useApp = create<AppStore>((set, get) => ({
   overlay: { open: false, screens: 1 },
   invite: null,
   setInvite: (invite) => set({ invite }),
+  update: null,
+  updateDismissed: false,
+  dismissUpdate: () => set({ updateDismissed: true }),
+  settingsTab: 'general',
+  setSettingsTab: (settingsTab) => set({ settingsTab }),
   toasts: [],
   diag: null,
   openDiag: (target) => set({ diag: target }),
@@ -67,21 +81,37 @@ export const useApp = create<AppStore>((set, get) => ({
 
   async init() {
     const b = api()
-    const [settings, radmin, appInfo, host, client, hosts] = await Promise.all([
+    const [settings, radmin, appInfo, host, client, hosts, update] = await Promise.all([
       b.getSettings(),
       b.getRadmin(),
       b.getAppInfo(),
       b.host.getState(),
       b.client.getState(),
-      b.client.getHosts()
+      b.client.getHosts(),
+      b.update.getState()
     ])
-    b.on('settings', (s) => set({ settings: s }))
+    b.on('settings', (s) => {
+      if (s.language !== get().settings?.language) setLanguage(s.language)
+      set({ settings: s })
+    })
     b.on('radmin', (r) => set({ radmin: r }))
     b.on('hostState', (h) => set({ host: h }))
     b.on('clientState', (c) => set({ client: c }))
     b.on('hosts', (h) => set({ hosts: h }))
     b.on('overlay', (o) => set({ overlay: o }))
-    set({ settings, radmin, appInfo, host, client, hosts, ready: true, screen: settings.onboarded ? 'home' : 'onboarding' })
+    b.on('update', (u) => set({ update: u }))
+    b.on('alert', ({ kind }) => playChime(kind))
+    // Пункты меню в трее открывают нужный экран.
+    b.on('navigate', (to) => {
+      if (!get().settings?.onboarded) return
+      if (to === 'about') {
+        set({ settingsTab: 'about' })
+        return get().go('settings')
+      }
+      if (to === 'settings') set({ settingsTab: 'general' })
+      get().go(to)
+    })
+    set({ settings, radmin, appInfo, host, client, hosts, update, ready: true, screen: settings.onboarded ? 'home' : 'onboarding' })
   },
 
   go(screen) {

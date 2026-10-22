@@ -45,6 +45,10 @@ export interface ClientDeps {
   poorNetworkClearMs?: number
   /** Автоподбор: сколько связь должна оставаться плохой, прежде чем снизить качество. */
   autoLowerAfterMs?: number
+  /** Автоподбор: сколько связь должна быть хорошей после снижения, чтобы вернуть замеренное качество. */
+  autoRaiseAfterMs?: number
+  /** Сколько держать соединение с хостом после окончания стрима (место у хоста занято). */
+  endedIdleMs?: number
   /** Сколько ждать результата замера скорости (старый хост замер не поддерживает). */
   speedTestTimeoutMs?: number
   /** Подключён ли этот ПК к сети по Wi-Fi (для подсказок). */
@@ -54,7 +58,7 @@ export interface ClientDeps {
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching', 'streaming']
 
-type TimerName = 'start' | 'lost' | 'pair' | 'queue'
+type TimerName = 'start' | 'lost' | 'pair' | 'queue' | 'hello' | 'idle'
 
 /** Moonlight пишет в лог «Connection status update: N»: 1 — плохая связь, 0 — нормальная. */
 export function parseConnectionStatus(line: string): boolean | undefined {
@@ -119,7 +123,12 @@ export class ClientController extends EventEmitter {
   private lastAutoLower = 0
   /** Автопереподключения после обрыва за последние минуты. */
   private reconnects: number[] = []
-  private speed: { bytes: number; first: number; last: number; firstBytes: number; done?: (mbps?: number) => void } | null = null
+  private speed: { bytes: number; first: number; last: number; firstBytes: number; sentAt: number; done?: (mbps?: number) => void } | null = null
+  /** Качество по замеру канала (до автоматических снижений). */
+  private measuredAuto: QualityProfile | null = null
+  private autoRaiseTimer: NodeJS.Timeout | null = null
+  /** Предыдущий Moonlight ещё закрывается: новый запускаем только после его выхода. */
+  private closing: Promise<unknown> | null = null
   private inputRequestTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly d: ClientDeps) {
@@ -197,8 +206,10 @@ export class ClientController extends EventEmitter {
     const address = rawAddress.trim()
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return this.fail('host_unreachable', 'bad address')
     if (!this.d.moonlight.available) return this.fail('moonlight_missing')
+    if (ACTIVE.includes(this.state.phase) && this.state.host?.address === address) return
     // После окончания стрима соединение с хостом держится: снова запускаем стрим без повторного одобрения.
     if (this.state.phase === 'ended' && this.admittedAt === address && this.ws?.readyState === WebSocket.OPEN) {
+      this.clearTimer('idle')
       this.set({ error: undefined, errorDetail: undefined, startedAt: undefined })
       return this.launch(this.attempt, address)
     }
@@ -207,6 +218,7 @@ export class ClientController extends EventEmitter {
     this.connectedAt = Date.now()
     this.inviteCode = opts.inviteCode
     this.auto = null
+    this.measuredAuto = null
     this.measured = false
     this.reconnects = []
     this.set({
@@ -238,6 +250,10 @@ export class ClientController extends EventEmitter {
     const ws = new WebSocket(`ws://${address}:${this.d.signalingPort ?? SIGNALING_PORT}`, { handshakeTimeout: this.d.connectTimeoutMs ?? 10_000 })
     this.ws = ws
     ws.on('open', () => {
+      // Порт открыт, но хост молчит (не Streamly или завис): не ждём бесконечно.
+      this.startTimer('hello', this.d.connectTimeoutMs ?? 10_000, attempt, () => {
+        if (this.state.phase === 'connecting') this.fail('host_not_hosting', 'no answer to hello')
+      })
       // Замер задержки и сторож: хост, переставший отвечать, обнаруживаем за ~15 с, а не по таймауту TCP.
       this.lastPong = Date.now()
       if (this.pingTimer) clearInterval(this.pingTimer)
@@ -288,6 +304,7 @@ export class ClientController extends EventEmitter {
     switch (msg.t) {
       case 'hostInfo':
         if (this.state.phase !== 'connecting') return
+        this.clearTimer('hello')
         this.set({ host: { address, name: msg.hostName } })
         this.send({ t: 'joinRequest' })
         this.set({ phase: 'waitingApproval' })
@@ -337,12 +354,19 @@ export class ClientController extends EventEmitter {
         // сертификат хоста на диск, затем закрываем и убеждаемся, что сопряжение записалось.
         await new Promise((r) => setTimeout(r, this.d.pairSettleMs ?? 1500))
         if (attempt !== this.attempt) return
-        this.pairProc?.kill()
+        const pp = this.pairProc
         this.pairProc = null
+        if (pp) {
+          if (pp.close) pp.close()
+          else pp.kill()
+          await Promise.race([pp.exited, new Promise((r) => setTimeout(r, 3000))])
+          if (attempt !== this.attempt) return
+        }
         for (let i = 0; i < 3; i++) {
           if (await this.isPaired(address)) return attempt === this.attempt ? this.launch(attempt, address) : undefined
           if (attempt !== this.attempt) return
-          await new Promise((r) => setTimeout(r, 1000))
+          if (i < 2) await new Promise((r) => setTimeout(r, 1000))
+          if (attempt !== this.attempt) return
         }
         return this.fail('pair_failed', 'moonlight did not save pairing')
       }
@@ -384,6 +408,10 @@ export class ClientController extends EventEmitter {
         return
       case 'speedEnd':
         return this.onSpeedEnd(msg.bytes)
+      case 'resetGamepad':
+        this.log('host asked to reconnect gamepads')
+        this.resetGamepad()
+        return
     }
   }
 
@@ -437,9 +465,15 @@ export class ClientController extends EventEmitter {
    * Запуск Moonlight по сигналу хоста. «Идёт трансляция» показываем, только когда хост подтвердил
    * подключение в Apollo (sessionState): Moonlight при ошибке не завершается, а висит с окном ошибки.
    */
-  private startStream(attempt: number): void {
+  private async startStream(attempt: number): Promise<void> {
     if (attempt !== this.attempt || this.state.phase !== 'launching' || !this.launchAddress) return
     this.clearTimer('queue')
+    // Прежний Moonlight ещё закрывается (отключение и сразу новое подключение): два окна одного клиента
+    // с одним сертификатом мешают друг другу, ждём его выхода (не дольше нескольких секунд).
+    if (this.closing) {
+      await Promise.race([this.closing, new Promise((r) => setTimeout(r, 4500))])
+      if (attempt !== this.attempt || this.state.phase !== 'launching') return
+    }
     const address = this.launchAddress
     if (this.streamProc) {
       this.streamProc.kill()
@@ -460,7 +494,10 @@ export class ClientController extends EventEmitter {
         auto: !!this.auto
       }
     })
-    void this.d.wifi?.().then((wifi) => attempt === this.attempt && this.state.wifi !== wifi && this.set({ wifi }))
+    void this.d
+      .wifi?.()
+      .then((wifi) => attempt === this.attempt && this.state.wifi !== wifi && this.set({ wifi }))
+      .catch(() => undefined)
     this.streamStartedAt = startedAt
     proc.onLine?.((line) => {
       const poor = parseConnectionStatus(line)
@@ -492,6 +529,12 @@ export class ClientController extends EventEmitter {
       }
       // Стрим закончен, а соединение с хостом оставляем: «Подключиться снова» не потребует нового одобрения.
       this.set({ phase: 'ended' })
+      // Но не навсегда: открытое соединение занимает место у хоста.
+      this.startTimer('idle', this.d.endedIdleMs ?? 10 * 60_000, attempt, () => {
+        if (this.state.phase !== 'ended') return
+        this.log('closing idle connection to the host')
+        this.teardown()
+      })
     })
   }
 
@@ -537,10 +580,14 @@ export class ClientController extends EventEmitter {
       this.set({ poorNetwork: v })
       this.send({ t: 'netStatus', poor: v })
     }
-    if (poor) this.scheduleAutoLower()
-    else if (this.autoLowerTimer) {
-      clearTimeout(this.autoLowerTimer)
+    if (poor) {
+      this.scheduleAutoLower()
+      if (this.autoRaiseTimer) clearTimeout(this.autoRaiseTimer)
+      this.autoRaiseTimer = null
+    } else {
+      if (this.autoLowerTimer) clearTimeout(this.autoLowerTimer)
       this.autoLowerTimer = null
+      if (!immediate) this.scheduleAutoRaise()
     }
     if (poor || immediate) return apply(poor)
     this.poorTimer = setTimeout(() => apply(false), this.d.poorNetworkClearMs ?? 6000)
@@ -565,6 +612,24 @@ export class ClientController extends EventEmitter {
     }, this.d.autoLowerAfterMs ?? 15_000)
   }
 
+  /**
+   * Автоподбор: качество снижали из-за плохой связи, а теперь она несколько минут хорошая —
+   * возвращаем замеренное качество (не чаще чем через 10 минут после снижения).
+   */
+  private scheduleAutoRaise(): void {
+    if (this.autoRaiseTimer || !this.state.autoLowered || !this.measuredAuto) return
+    const attempt = this.attempt
+    this.autoRaiseTimer = setTimeout(() => {
+      this.autoRaiseTimer = null
+      if (attempt !== this.attempt || this.state.poorNetwork || this.state.phase !== 'streaming' || !this.measuredAuto) return
+      if (Date.now() - this.lastAutoLower < 10 * 60_000) return this.scheduleAutoRaise()
+      this.auto = this.measuredAuto
+      this.log('auto quality: connection is stable again, back to the measured quality')
+      this.set({ autoLowered: false })
+      this.restartStream()
+    }, this.d.autoRaiseAfterMs ?? 5 * 60_000)
+  }
+
   /** Настройки трансляции для этого хоста: автоподбор, своё качество хоста или общие настройки. */
   private effectiveStream(address: string): StreamSettings {
     const s = this.d.settings.get()
@@ -583,6 +648,7 @@ export class ClientController extends EventEmitter {
         const s = this.d.settings.get().stream
         if (mbps && mbps > 0) {
           this.auto = autoProfile(mbps, s, this.state.policy?.maxBitrateKbps ?? 0)
+          this.measuredAuto = this.auto
           this.log(`speed test: ${mbps.toFixed(1)} Mbit/s -> ${this.auto.resolution} ${this.auto.fps}fps ${this.auto.bitrateKbps}kbps`)
         }
         this.set({ measuring: false, speedMbps: mbps ? Math.round(mbps) : undefined, relaySuspect: relaySuspect(this.rttSamples, mbps) })
@@ -590,7 +656,7 @@ export class ClientController extends EventEmitter {
       }
       // Старый хост не отвечает на замер: через несколько секунд стартуем с обычными настройками.
       const timer = setTimeout(() => finish(this.speedResult()), this.d.speedTestTimeoutMs ?? 6000)
-      this.speed = { bytes: 0, first: 0, last: 0, firstBytes: 0, done: finish }
+      this.speed = { bytes: 0, first: 0, last: 0, firstBytes: 0, sentAt: performance.now(), done: finish }
       this.send({ t: 'speedTest' })
     })
   }
@@ -613,7 +679,11 @@ export class ClientController extends EventEmitter {
     if (!sp || sp.last <= sp.first) return undefined
     const bytes = sp.bytes - sp.firstBytes
     if (bytes < 256 * 1024) return undefined
-    return (bytes * 8) / ((sp.last - sp.first) / 1000) / 1e6
+    // Куски могут прийти одной пачкой (занятый процесс, склеенные чтения TCP): тогда время между первым
+    // и последним почти нулевое. Берём и время от запроса за вычетом задержки — оценка будет скромнее.
+    const rtt = this.rttSamples.length ? [...this.rttSamples].sort((a, b) => a - b)[this.rttSamples.length >> 1] : 0
+    const elapsed = Math.max(sp.last - sp.first, sp.last - sp.sentAt - rtt, 50)
+    return (bytes * 8) / (elapsed / 1000) / 1e6
   }
 
   private onSpeedEnd(bytes: number): void {
@@ -667,6 +737,27 @@ export class ClientController extends EventEmitter {
     return true
   }
 
+  /**
+   * Переподключить геймпады: двойной или зависший геймпад. Виртуальные геймпады у хоста живут, пока идёт
+   * сессия Apollo, поэтому быстро перезапускаем трансляцию: Moonlight заново находит свои геймпады,
+   * а хост создаёт новые.
+   */
+  resetGamepad(): boolean {
+    if (this.state.phase !== 'streaming') return false
+    this.log('reconnecting gamepads')
+    return this.restartStream()
+  }
+
+  /** Выход из Streamly: закрываем Moonlight и ждём, пока он завершится (иначе останется висеть без нас). */
+  async shutdown(): Promise<void> {
+    const proc = this.streamProc
+    this.teardown()
+    this.set({ phase: 'idle', error: undefined, errorDetail: undefined })
+    if (!proc) return
+    const exited = await Promise.race([proc.exited.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 4000))])
+    if (!exited) proc.kill()
+  }
+
   /** Отмена подключения или отключение от стрима. */
   async cancel(): Promise<void> {
     this.teardown()
@@ -689,6 +780,8 @@ export class ClientController extends EventEmitter {
     this.poorTimer = null
     if (this.autoLowerTimer) clearTimeout(this.autoLowerTimer)
     this.autoLowerTimer = null
+    if (this.autoRaiseTimer) clearTimeout(this.autoRaiseTimer)
+    this.autoRaiseTimer = null
     if (this.inputRequestTimer) clearTimeout(this.inputRequestTimer)
     this.inputRequestTimer = null
     this.speed?.done?.()
@@ -702,9 +795,14 @@ export class ClientController extends EventEmitter {
     this.listProc = null
     if (this.streamProc) {
       // Мягкое закрытие: Moonlight сообщает Apollo об отключении, и место у хоста освобождается сразу.
-      if (this.streamProc.close) this.streamProc.close()
-      else this.streamProc.kill()
+      const proc = this.streamProc
+      if (proc.close) proc.close()
+      else proc.kill()
       this.streamProc = null
+      const closing: Promise<unknown> = proc.exited.finally(() => {
+        if (this.closing === closing) this.closing = null
+      })
+      this.closing = closing
       this.send({ t: 'sessionEnded' })
     }
     if (this.ws) {

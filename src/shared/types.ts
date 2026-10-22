@@ -33,6 +33,8 @@ export interface StreamSettings {
   hdr: boolean
   /** Цвет 4:4:4: чёткий текст, но больше трафика и нужна поддержка с обеих сторон. */
   yuv444: boolean
+  /** Все геймпады этого ПК — как один (первый игрок): против двойных геймпадов (Steam Input, DS4Windows). */
+  singleGamepad: boolean
 }
 
 /** Качество для конкретного хоста (запоминается из меню Alt+F2). */
@@ -92,6 +94,8 @@ export interface HostSettings {
   autoStartHosting: boolean
   /** Друзья со ссылкой-приглашением входят без подтверждения. */
   inviteAutoAdmit: boolean
+  /** Звук при запросе на подключение или просьбе об управлении. */
+  requestSound: boolean
 }
 
 /** Условия трансляции, которые хост сообщает игроку при допуске. */
@@ -163,6 +167,35 @@ export interface Settings {
   recentHosts: RecentHost[]
   /** Своё качество для отдельных хостов (по адресу). */
   hostQuality: Record<string, QualityProfile>
+  updates: UpdateSettings
+  /** Показывать редко нужные настройки. */
+  showAdvanced: boolean
+}
+
+export interface UpdateSettings {
+  /** Проверять обновления на GitHub при запуске и раз в несколько часов. */
+  auto: boolean
+  /** Версия, которую попросили не предлагать (ручная проверка всё равно её покажет). */
+  skipped: string
+}
+
+export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'latest' | 'error' | 'unsupported'
+
+/** Обновление Streamly через GitHub Releases. Ничего не ставится без согласия пользователя. */
+export interface UpdateState {
+  status: UpdateStatus
+  /** Текущая версия. */
+  current: string
+  /** Найденная новая версия. */
+  version?: string
+  /** Что нового (текст из релиза). */
+  notes?: string
+  /** Загрузка, 0–100. */
+  percent?: number
+  /** Скорость загрузки, байт/с. */
+  bytesPerSecond?: number
+  error?: string
+  checkedAt?: number
 }
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
@@ -192,7 +225,9 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     muteHostChat: true,
     autoQuality: false,
     hdr: false,
-    yuv444: false
+    yuv444: false,
+    // Steam Input и DS4Windows у игрока показывают геймпад дважды: у хоста появлялось два. Один на ПК — частый случай.
+    singleGamepad: true
   },
   host: {
     maxPlayers: 4,
@@ -221,10 +256,13 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     },
     notifyRequests: true,
     autoStartHosting: false,
-    inviteAutoAdmit: true
+    inviteAutoAdmit: true,
+    requestSound: true
   },
   recentHosts: [],
-  hostQuality: {}
+  hostQuality: {},
+  updates: { auto: true, skipped: '' },
+  showAdvanced: false
 }
 
 export interface RadminStatus {
@@ -328,6 +366,8 @@ export interface HostState {
   inputPaused: boolean
   /** Видео кодирует не та видеокарта (например, встроенная графика Ryzen при наличии RTX). */
   wrongGpu?: { encoderVendor: EncoderVendor; better: string }
+  /** Apollo перестал отвечать во время хостинга: Streamly пробует перезапустить его службу. */
+  apolloDown?: boolean
 }
 
 export interface TrustedFriendView {

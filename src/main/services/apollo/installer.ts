@@ -96,9 +96,27 @@ export interface ApolloInstallStatus {
 }
 
 async function serviceState(name: string): Promise<'missing' | 'running' | 'stopped'> {
+  const s = await serviceDetail(name)
+  return s === 'missing' || s === 'running' ? s : 'stopped'
+}
+
+/** Состояние службы с переходными: sc stop возвращается, пока служба ещё останавливается. */
+async function serviceDetail(name: string): Promise<'missing' | 'running' | 'stopped' | 'pending'> {
   const res = await run('sc.exe', ['query', name])
   if (res.code !== 0) return 'missing'
+  if (/_PENDING/.test(res.stdout)) return 'pending'
   return /RUNNING/.test(res.stdout) ? 'running' : 'stopped'
+}
+
+/** Ждёт, пока служба придёт в нужное состояние (не дольше timeoutMs). */
+async function waitService(name: string, want: 'running' | 'stopped', timeoutMs = 10_000): Promise<boolean> {
+  const until = Date.now() + timeoutMs
+  for (;;) {
+    const s = await serviceDetail(name)
+    if (s === want) return true
+    if (s === 'missing' || Date.now() > until) return false
+    await new Promise((r) => setTimeout(r, 400))
+  }
 }
 
 export interface SetupOptions {
@@ -147,16 +165,20 @@ export class ApolloInstaller {
   /** Делает всё, что требует прав администратора, за одно окно UAC. */
   /** Запуск службы Apollo без прав администратора (после настройки serviceControl). */
   async startService(): Promise<boolean> {
+    // Хост только что остановили и сразу включили снова: служба ещё останавливается, sc start не сработает.
+    if ((await serviceDetail(APOLLO_SERVICE)) === 'pending') await waitService(APOLLO_SERVICE, 'stopped')
     const r = await run('sc.exe', ['start', APOLLO_SERVICE])
     // 1056 — служба уже запущена.
-    return r.code === 0 || r.code === 1056 || (await serviceState(APOLLO_SERVICE)) === 'running'
+    if (r.code !== 0 && r.code !== 1056) return (await serviceState(APOLLO_SERVICE)) === 'running'
+    return waitService(APOLLO_SERVICE, 'running')
   }
 
   /** Остановка службы Apollo, когда режим хоста выключен. */
   async stopService(): Promise<boolean> {
     const r = await run('sc.exe', ['stop', APOLLO_SERVICE])
     // 1062 — служба и так остановлена.
-    return r.code === 0 || r.code === 1062
+    if (r.code === 1062) return true
+    return r.code === 0 && (await waitService(APOLLO_SERVICE, 'stopped'))
   }
 
   async setup(opts: SetupOptions): Promise<ElevatedResult> {

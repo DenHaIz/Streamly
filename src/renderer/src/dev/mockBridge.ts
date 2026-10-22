@@ -1,7 +1,7 @@
 // Фейковый API основного процесса для разработки интерфейса в браузере (npm run dev:web).
 // Имитирует хост с входящими запросами и клиент с поиском и подключением.
 import type { BridgeEvent, BridgeEvents, StreamlyBridge } from '@shared/ipc'
-import type { ClientState, DiscoveredHost, HostDisplay, HostState, Settings, TrustedFriendView } from '@shared/types'
+import type { ClientState, DiscoveredHost, HostDisplay, HostState, Settings, TrustedFriendView, UpdateState } from '@shared/types'
 import { NO_INPUT } from '@shared/perms'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { MotionGlobalConfig } from 'framer-motion'
@@ -41,6 +41,22 @@ const displays: HostDisplay[] = [
   { id: '{de9bb7e2-186e-505b-9e93-f48793333810}', name: 'ROG PG279Q', displayName: '\\\\.\\DISPLAY1', primary: true, width: 2560, height: 1440, fps: 165 },
   { id: '{a1b2c3d4-0000-4000-8000-000000000002}', name: 'DELL U2419H', displayName: '\\\\.\\DISPLAY2', primary: false, width: 1920, height: 1080, fps: 60 }
 ]
+// ?update=available|ready — найдено обновление (или уже скачано).
+const updParam = params.get('update')
+let update: UpdateState = {
+  status: updParam === 'ready' ? 'ready' : updParam === 'available' ? 'available' : 'latest',
+  current: '0.4.0',
+  version: updParam ? '0.5.0' : undefined,
+  notes: updParam
+    ? 'Что нового\n• Автообновление через GitHub\n• Звук и мигание значка при запросе на подключение\n• Переподключение геймпада в меню Alt+F2'
+    : undefined,
+  checkedAt: Date.now() - 3600e3
+}
+const setUpdate = (patch: Partial<UpdateState>): void => {
+  update = { ...update, ...patch }
+  emit('update', update)
+}
+
 // ?stream=1 — сразу «идёт трансляция» (и меню Alt+F2 по адресу #overlay).
 const streamingDemo: ClientState = {
   phase: 'streaming',
@@ -106,6 +122,26 @@ const bridge: StreamlyBridge = {
   copyDiagnostics: async () => void navigator.clipboard?.writeText('Streamly diagnostics (mock)').catch(() => undefined),
   // ?invite=1 — показать приглашение при запуске.
   checkInvite: async () => (params.get('invite') === '1' && !inviteShown ? ((inviteShown = true), { address: '26.51.7.12', name: 'Дима', code: 'demo-invite-code' }) : null),
+  update: {
+    getState: async () => update,
+    async check() {
+      setUpdate({ status: 'checking', error: undefined })
+      await wait(1200)
+      setUpdate(updParam ? { status: 'available', checkedAt: Date.now() } : { status: 'latest', checkedAt: Date.now() })
+      return update
+    },
+    async download() {
+      for (let p = 0; p <= 100; p += 7) {
+        setUpdate({ status: 'downloading', percent: Math.min(p, 99), bytesPerSecond: 12_500_000 })
+        await wait(220)
+      }
+      setUpdate({ status: 'ready', percent: 100 })
+    },
+    install: async () => undefined,
+    async skip(version) {
+      await bridge.updateSettings({ updates: { skipped: version } })
+    }
+  },
   host: {
     getState: async () => host,
     async start() {
@@ -215,7 +251,8 @@ const bridge: StreamlyBridge = {
     },
     async setInputPaused(paused) {
       setHost({ inputPaused: paused })
-    }
+    },
+    resetGamepad: async () => undefined
   },
   client: {
     getState: async () => client,
@@ -286,6 +323,9 @@ const bridge: StreamlyBridge = {
       await wait(2500)
       setClient({ restarting: false, poorNetwork: false, jitterMs: 3 })
       return true
+    },
+    resetGamepad() {
+      return bridge.client.restartStream()
     }
   },
   overlay: {

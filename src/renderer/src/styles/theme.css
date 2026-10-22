@@ -322,7 +322,7 @@ textarea {
 .btn-danger {
   background: var(--danger-soft);
   border-color: transparent;
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .btn-danger:hover {
@@ -337,7 +337,7 @@ textarea {
 }
 
 .btn-success:hover {
-  background: #16a34a;
+  filter: brightness(0.92);
 }
 
 .btn-sm {
@@ -428,6 +428,14 @@ textarea {
   gap: 6px;
 }
 
+.segmented.disabled {
+  opacity: 0.5;
+}
+
+.segmented button:disabled {
+  cursor: default;
+}
+
 .segmented button.active {
   color: var(--text);
 }
@@ -456,7 +464,6 @@ textarea {
 
 .switch.on {
   background: var(--accent);
-  justify-content: flex-end;
 }
 
 .switch-knob {
@@ -625,15 +632,6 @@ textarea {
   }
 }
 
-.kbd {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 6px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  font-size: 12px;
-  font-weight: 600;
-}
 
 /* ---------- Тосты ---------- */
 
@@ -680,7 +678,7 @@ textarea {
   inset: 0;
   z-index: 40;
   background: rgba(8, 10, 16, 0.45);
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(3px);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -710,4 +708,16 @@ html[data-idle] *::after {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+  /* Индикаторы загрузки должны крутиться и так, только медленнее. */
+  .spinner,
+  .spin {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+.select:focus-visible,
+.slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

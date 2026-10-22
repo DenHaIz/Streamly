@@ -12,11 +12,15 @@ import {
   screen,
   shell,
   Tray,
-  type IpcMainInvokeEvent
+  type IpcMainInvokeEvent,
+  type MenuItemConstructorOptions,
+  type NativeImage
 } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision } from '@shared/ipc'
+import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision, type NavTarget } from '@shared/ipc'
+import { inviteMessage } from '@shared/invite'
 import type { InputPerms } from '@shared/perms'
 import type { ClientState, DeepPartial, HostDisplay, HostState, Invite, RadminStatus, Settings } from '@shared/types'
 import { parseInviteLink } from '@shared/protocol'
@@ -31,6 +35,7 @@ import { MoonlightRunner } from './services/moonlight/runner'
 import { detectRadmin } from './services/net/radmin'
 import { probeHosts, radminNeighbors } from './services/net/discovery'
 import { diagnoseHost, probePort } from './services/net/diagnose'
+import { UpdateService } from './services/update/updater'
 
 // Отдельный профиль позволяет запустить второй экземпляр на одном ПК (хост и клиент для отладки).
 const profile = process.env.STREAMLY_PROFILE
@@ -112,6 +117,28 @@ function showWindow(): void {
 /** Меню во время игры (Alt+F2): прозрачное окно поверх трансляции. */
 let overlay: BrowserWindow | null = null
 const OVERLAY_KEY = 'Alt+F2'
+/**
+ * Запасное сочетание: когда Moonlight перехватывает системные клавиши (полный экран), его хук клавиатуры
+ * съедает Alt, и Alt+F2 до Windows может не дойти. Ctrl и Shift он пропускает.
+ */
+const OVERLAY_KEY_ALT = 'Ctrl+Shift+F2'
+/** Уведомления Windows держим, пока они на экране: иначе сборщик мусора может отвязать обработчик клика. */
+const liveNotifications = new Set<Notification>()
+function notify(body: string, onClick: () => void, silent = false): void {
+  if (!Notification.isSupported()) return
+  const n = new Notification({ title: 'Streamly', body, silent })
+  liveNotifications.add(n)
+  const drop = (): void => void liveNotifications.delete(n)
+  n.on('click', () => {
+    drop()
+    onClick()
+  })
+  n.on('close', drop)
+  n.on('failed', drop)
+  n.show()
+  // Windows убирает уведомление в центр уведомлений: дольше держать ссылку незачем.
+  setTimeout(drop, 60_000)
+}
 
 function broadcast<E extends BridgeEvent>(event: E, payload: BridgeEvents[E]): void {
   win?.webContents.send(EVENT_CHANNEL, event, payload)
@@ -132,6 +159,39 @@ function lockDown(w: BrowserWindow): void {
   w.webContents.on('will-navigate', (e) => e.preventDefault())
   w.webContents.on('will-redirect', (e) => e.preventDefault())
   w.webContents.on('will-attach-webview', (e) => e.preventDefault())
+}
+
+/**
+ * Значок трея с точкой-уведомлением (запрос на подключение): рисуем поверх обычного значка,
+ * чтобы не возить отдельные картинки. Две плотности — для обычных и HiDPI-экранов.
+ */
+function badgeIcon(base: NativeImage): NativeImage {
+  const out = nativeImage.createEmpty()
+  for (const [size, scale] of [
+    [16, 1],
+    [32, 2]
+  ] as const) {
+    const img = base.resize({ width: size, height: size, quality: 'best' })
+    const buf = Buffer.from(img.toBitmap())
+    const r = size * 0.24
+    const cx = size - r - 0.5
+    const cy = size - r - 0.5
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy)
+        if (d > r + 1.2 * scale) continue
+        const i = (y * size + x) * 4
+        // Белая обводка вокруг красной точки, чтобы её было видно и на тёмной, и на светлой панели задач.
+        const [b, g, rr] = d <= r ? [0x57, 0x47, 0xff] : [0xff, 0xff, 0xff]
+        buf[i] = b
+        buf[i + 1] = g
+        buf[i + 2] = rr
+        buf[i + 3] = 0xff
+      }
+    }
+    out.addRepresentation({ scaleFactor: scale, width: size, height: size, buffer: nativeImage.createFromBitmap(buf, { width: size, height: size }).toPNG() })
+  }
+  return out
 }
 
 const DARK_BG = '#0e1015'
@@ -162,7 +222,12 @@ function createWindow(settings: Settings): void {
   })
   lockDown(win)
   loadRenderer(win)
-  win.on('closed', () => (win = null))
+  // Окно действительно закрыто (не спрятано в трей): выходим. Скрытое меню Alt+F2 иначе держало бы
+  // Streamly живым без окна — ни «Открыть», ни повторный запуск ничего бы не показали.
+  win.on('closed', () => {
+    win = null
+    if (!quitting) app.quit()
+  })
 }
 
 function createOverlay(): BrowserWindow {
@@ -255,6 +320,25 @@ void app.whenReady().then(() => {
     log
   })
 
+  // ---------- Обновления через GitHub Releases (только в установленной версии) ----------
+  const updates = new UpdateService({
+    backend: app.isPackaged ? autoUpdater : null,
+    currentVersion: appVersion,
+    autoCheck: () => settings.get().updates.auto,
+    skipped: () => settings.get().updates.skipped,
+    beforeInstall: async () => {
+      quitting = true
+      globalShortcut.unregisterAll()
+      await Promise.race([Promise.all([host.stop(), client.shutdown()]), new Promise((r) => setTimeout(r, 8000))])
+      helper.stop()
+    },
+    log
+  })
+  // Только первая строка: ошибки electron-updater приходят с HTTP-заголовками и стеком. Ошибки пишет сам UpdateService.
+  const updLog = (m: unknown): void => log(`[update] ${String(m).split('\n')[0].slice(0, 300)}`)
+  autoUpdater.logger = { info: updLog, warn: updLog, error: () => undefined, debug: () => undefined }
+  updates.on('state', (s) => broadcast('update', s))
+
   let lastHost = ''
   host.on('state', (s: HostState) => {
     broadcast('hostState', s)
@@ -263,28 +347,20 @@ void app.whenReady().then(() => {
     lastHost = sig
   })
   host.on('joinRequest', ({ nickname }: { nickname: string }) => {
+    attention('joinRequest')
     if (win?.isFocused() || !settings.get().host.notifyRequests) return
-    win?.flashFrame(true)
     const ru = settings.get().language === 'ru'
-    if (Notification.isSupported()) {
-      const n = new Notification({
-        title: 'Streamly',
-        body: ru ? `${nickname} хочет подключиться` : `${nickname} wants to join`
-      })
-      n.on('click', showWindow)
-      n.show()
-    }
+    // Свой звук уже сыграл интерфейс: уведомление Windows без звука, чтобы не было двух сигналов.
+    notify(ru ? `${nickname} хочет подключиться` : `${nickname} wants to join`, showWindow, settings.get().host.requestSound)
   })
   // Вход по приглашению и просьбы об управлении: хост мог отвлечься на игру, поэтому уведомление Windows.
   const hostNotify = (ru: string, en: string, always = false): void => {
-    if ((!always && win?.isFocused()) || !settings.get().host.notifyRequests || !Notification.isSupported()) return
-    const n = new Notification({ title: 'Streamly', body: settings.get().language === 'ru' ? ru : en })
-    n.on('click', showWindow)
-    n.show()
+    if ((!always && win?.isFocused()) || !settings.get().host.notifyRequests) return
+    notify(settings.get().language === 'ru' ? ru : en, showWindow)
   }
   host.on('inviteJoin', ({ nickname }: { nickname: string }) => hostNotify(`${nickname} вошёл по приглашению`, `${nickname} joined with your invite`))
   host.on('inputRequest', ({ nickname }: { nickname: string }) => {
-    win?.flashFrame(true)
+    attention('inputRequest')
     hostNotify(`${nickname} просит управление`, `${nickname} asks for control`, true)
   })
   // Пауза управления у всех — горячей клавишей, пока идёт хостинг.
@@ -300,15 +376,20 @@ void app.whenReady().then(() => {
     }
   })
 
+  // В лог — только смена этапа или ошибки: замеры задержки каждые 3 с иначе вытесняют из отчёта всё полезное.
+  let lastClient = ''
   client.on('state', (s: ClientState) => {
     broadcast('clientState', s)
-    log(`[client] ${s.phase} host=${s.host?.address ?? '-'}${s.error ? ` error=${s.error}` : ''}${s.errorDetail ? ` (${s.errorDetail})` : ''}`)
+    const sig = `${s.phase} host=${s.host?.address ?? '-'}${s.error ? ` error=${s.error}` : ''}${s.restarting ? ' restarting' : ''}${s.reconnecting ? ' reconnecting' : ''}${s.poorNetwork ? ' poor' : ''}`
+    if (sig !== lastClient) log(`[client] ${sig}${s.errorDetail ? ` (${s.errorDetail})` : ''}`)
+    lastClient = sig
   })
   client.on('hosts', (h) => broadcast('hosts', h))
   let prevSettings = settings.get()
   settings.on('change', (s: Settings) => {
     broadcast('settings', s)
-    app.setLoginItemSettings({ openAtLogin: s.autostart, args: ['--hidden'] })
+    // Запись в реестр — только когда автозапуск действительно переключили.
+    if (s.autostart !== prevSettings.autostart) app.setLoginItemSettings({ openAtLogin: s.autostart, args: ['--hidden'] })
     if (s.stream.volume !== prevSettings.stream.volume) applyVolume()
     if (s.stream.muteHostChat !== prevSettings.stream.muteHostChat) client.prefsChanged()
     prevSettings = s
@@ -342,7 +423,10 @@ void app.whenReady().then(() => {
     if (!pid) return
     // Меню открывается на том мониторе, где окно трансляции.
     let bounds = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds
-    const rect = helper.available ? await helper.windowRect(pid).catch(() => null) : null
+    // Помощник может быть занят (WMI, звук): меню не должно ждать дольше полсекунды.
+    const rect = helper.available
+      ? await Promise.race([helper.windowRect(pid).catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), 500))])
+      : null
     if (rect && rect.width > 0) bounds = screen.getDisplayMatching(screen.screenToDipRect(null, rect)).bounds
     overlay ??= createOverlay()
     const o = overlay
@@ -366,64 +450,210 @@ void app.whenReady().then(() => {
     if (overlay?.isVisible()) hideOverlay(true)
     else void showOverlay().catch((e: unknown) => log('[overlay] show failed', e))
   }
-  let shortcutOn = false
+  // Горячие клавиши меню регистрируются при входе в игру и снимаются при выходе (а не на каждое обновление состояния).
+  let shortcutWanted = false
   const syncShortcut = (s: ClientState): void => {
     const want = s.phase === 'streaming' || s.phase === 'launching'
-    if (want && !shortcutOn) {
-      shortcutOn = globalShortcut.register(OVERLAY_KEY, toggleOverlay)
-      if (!shortcutOn) log(`[overlay] ${OVERLAY_KEY} is taken by another program`)
-    } else if (!want && shortcutOn) {
-      globalShortcut.unregister(OVERLAY_KEY)
-      shortcutOn = false
+    if (want !== shortcutWanted) {
+      shortcutWanted = want
+      for (const key of [OVERLAY_KEY, OVERLAY_KEY_ALT]) {
+        if (want) {
+          if (!globalShortcut.register(key, toggleOverlay)) log(`[overlay] ${key} is taken by another program`)
+        } else if (globalShortcut.isRegistered(key)) globalShortcut.unregister(key)
+      }
     }
     if (s.phase !== 'streaming' && !s.restarting) hideOverlay(false)
   }
   client.on('state', syncShortcut)
 
   // ---------- Трей: Streamly продолжает хостить или держать стрим, когда окно закрыто ----------
+  const navigate = (to: NavTarget): void => {
+    showWindow()
+    win?.webContents.send(EVENT_CHANNEL, 'navigate', to)
+  }
+  const copyInvite = (): void => {
+    const inv = host.createInvite()
+    const hs = host.getState()
+    if (!inv || !hs.address) return
+    clipboard.writeText(inviteMessage(settings.get().language, { name: hs.hostName, address: hs.address, link: inv.link }))
+    trayBalloon(settings.get().language === 'ru' ? 'Приглашение скопировано — отправьте его друзьям' : 'Invite copied — send it to your friends')
+  }
+  const trayBalloon = (content: string): void => notify(content, showWindow, true)
   const updateTray = (): void => {
     if (!tray) return
     const ru = settings.get().language === 'ru'
+    const L = (r: string, e: string): string => (ru ? r : e)
     const hs = host.getState()
     const cs = client.getState()
+    const us = updates.getState()
     const hosting = hs.phase === 'running'
+    const inSession = ['connecting', 'waitingApproval', 'pairing', 'launching', 'streaming'].includes(cs.phase)
+    const items: MenuItemConstructorOptions[] = []
+    // Запросы и просьбы — прямо из трея, не открывая окно.
+    for (const r of hs.requests) {
+      items.push({
+        label: L(`${r.nickname} хочет подключиться`, `${r.nickname} wants to join`),
+        submenu: [
+          { label: L('Разрешить', 'Allow'), click: () => void host.respond(r.id, 'allow') },
+          { label: L('Разрешить и доверять', 'Allow and trust'), click: () => void host.respond(r.id, 'trust') },
+          { label: L('Отклонить', 'Deny'), click: () => void host.respond(r.id, 'deny') }
+        ]
+      })
+    }
+    for (const p of hs.players.filter((x) => x.inputRequest)) {
+      items.push({
+        label: L(`${p.nickname} просит управление`, `${p.nickname} asks for control`),
+        submenu: [
+          { label: L('Выдать', 'Give'), click: () => void host.respondInput(p.deviceId, true) },
+          { label: L('Отказать', 'Deny'), click: () => void host.respondInput(p.deviceId, false) }
+        ]
+      })
+    }
+    if (items.length) items.push({ type: 'separator' })
+    if (hosting) {
+      items.push(
+        { label: L('Скопировать приглашение', 'Copy invite'), click: copyInvite },
+        { label: L(`Скопировать адрес (${hs.address ?? ''})`, `Copy address (${hs.address ?? ''})`), enabled: !!hs.address, click: () => clipboard.writeText(hs.address ?? '') }
+      )
+      if (hs.players.length) {
+        items.push({
+          label: L('Игроки', 'Players'),
+          submenu: hs.players.map((p) => ({
+            label: p.nickname,
+            submenu: [
+              { label: L('Переподключить геймпад', 'Reconnect gamepad'), click: () => void host.resetGamepad(p.deviceId) },
+              { label: L('Отключить', 'Disconnect'), click: () => void host.kick(p.deviceId) }
+            ]
+          }))
+        })
+      }
+      items.push(
+        {
+          label: hs.inputPaused ? L('Вернуть управление игрокам', 'Give control back') : L('Забрать управление у всех', 'Take control from everyone'),
+          accelerator: PAUSE_KEY,
+          click: () => void host.setInputPaused(!hs.inputPaused)
+        },
+        { label: L('Остановить хост', 'Stop hosting'), click: () => void host.stop() }
+      )
+    } else if (!inSession && (hs.phase === 'idle' || hs.phase === 'error')) {
+      items.push({ label: L('Стать хостом', 'Start hosting'), enabled: !!(radmin.connected || DEV_IP), click: () => (navigate('host'), void host.start()) })
+      const recent = settings.get().recentHosts.slice(0, 5)
+      items.push({
+        label: L('Подключиться', 'Connect'),
+        submenu: [
+          ...recent.map((h) => ({ label: `${h.name} · ${h.address}`, click: () => (navigate('connect'), void client.connect(h.address)) })),
+          ...(recent.length ? [{ type: 'separator' as const }] : []),
+          { label: L('Найти хосты…', 'Find hosts…'), click: () => navigate('connect') }
+        ]
+      })
+    }
+    if (cs.phase === 'streaming') {
+      items.push(
+        { label: L('Меню игры', 'In-game menu'), accelerator: OVERLAY_KEY, click: () => toggleOverlay() },
+        { label: L('Переподключить геймпад', 'Reconnect gamepad'), click: () => void client.resetGamepad() },
+        { label: L('Перезапустить трансляцию', 'Restart stream'), click: () => void client.restartStream() }
+      )
+    }
+    if (inSession) items.push({ label: cs.phase === 'streaming' ? L('Отключиться', 'Disconnect') : L('Отменить подключение', 'Cancel connecting'), click: () => void client.cancel() })
+    const offered = updates.offered
+    if (offered && (us.status === 'available' || us.status === 'downloading' || us.status === 'ready')) {
+      items.push(
+        { type: 'separator' },
+        us.status === 'ready'
+          ? { label: L(`Установить Streamly ${offered} и перезапустить`, `Install Streamly ${offered} and restart`), click: () => void updates.install() }
+          : us.status === 'downloading'
+            ? { label: L(`Загрузка обновления: ${us.percent ?? 0}%`, `Downloading update: ${us.percent ?? 0}%`), enabled: false }
+            : { label: L(`Скачать обновление ${offered}`, `Download update ${offered}`), click: () => void updates.download() }
+      )
+    }
     const status = hosting
-      ? ru
-        ? `Хост · игроков: ${hs.players.length}`
-        : `Hosting · players: ${hs.players.length}`
+      ? L(`Хост · игроков: ${hs.players.length}`, `Hosting · players: ${hs.players.length}`)
       : cs.phase === 'streaming'
-        ? (ru ? 'В игре у ' : 'Playing at ') + (cs.host?.name ?? '')
-        : ru
-          ? 'Не активен'
-          : 'Idle'
-    tray.setToolTip(`Streamly — ${status}`)
+        ? L('В игре у ', 'Playing at ') + (cs.host?.name ?? '')
+        : inSession
+          ? L('Подключение…', 'Connecting…')
+          : L('Не активен', 'Idle')
+    tray.setToolTip(`Streamly — ${status}${hs.requests.length ? L(' · есть запросы', ' · join requests') : ''}`)
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: status, enabled: false },
         { type: 'separator' },
-        { label: ru ? 'Открыть Streamly' : 'Open Streamly', click: showWindow },
-        ...(hosting
-          ? [
-              {
-                label: hs.inputPaused ? (ru ? 'Вернуть управление игрокам' : 'Give control back') : ru ? 'Забрать управление у всех' : 'Take control from everyone',
-                accelerator: PAUSE_KEY,
-                click: () => void host.setInputPaused(!hs.inputPaused)
-              },
-              { label: ru ? 'Остановить хост' : 'Stop hosting', click: () => void host.stop() }
-            ]
-          : []),
-        ...(cs.phase === 'streaming' ? [{ label: ru ? 'Отключиться' : 'Disconnect', click: () => void client.cancel() }] : []),
+        { label: L('Открыть Streamly', 'Open Streamly'), click: showWindow },
+        ...items,
         { type: 'separator' },
-        { label: ru ? 'Выход' : 'Quit', click: () => app.quit() }
+        { label: L('Настройки', 'Settings'), click: () => navigate('settings') },
+        { label: L('Проверить обновления', 'Check for updates'), click: () => (navigate('about'), void updates.check(true)) },
+        { label: L('Выход', 'Quit'), click: () => app.quit() }
       ])
     )
+    syncAttention()
   }
-  tray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 }))
+
+  const trayIcon = nativeImage.createFromPath(iconPath)
+  const trayNormal = trayIcon.resize({ width: 16, height: 16 })
+  const trayAlert = badgeIcon(trayIcon)
+  tray = new Tray(trayNormal)
   tray.on('click', showWindow)
-  updateTray()
-  host.on('state', updateTray)
-  client.on('state', updateTray)
-  settings.on('change', updateTray)
+  // Состояние меняется часто (задержка, поток): пересобираем меню только при видимых изменениях.
+  let traySig = ''
+  const refreshTray = (): void => {
+    const hs = host.getState()
+    const cs = client.getState()
+    const us = updates.getState()
+    const sig = JSON.stringify([
+      settings.get().language,
+      hs.phase,
+      hs.address,
+      hs.inputPaused,
+      hs.requests.map((r) => r.id),
+      hs.players.map((p) => [p.deviceId, p.nickname, !!p.inputRequest]),
+      cs.phase,
+      cs.host?.name,
+      us.status,
+      us.status === 'downloading' ? Math.floor((us.percent ?? 0) / 10) : 0,
+      updates.offered,
+      settings.get().recentHosts.map((h) => h.address),
+      radmin.connected
+    ])
+    if (sig === traySig) return
+    traySig = sig
+    updateTray()
+  }
+  // ---------- Внимание хоста: звук, мигание окна на панели задач и значка в трее ----------
+  let blinkTimer: NodeJS.Timeout | null = null
+  const needsAttention = (): boolean => {
+    const hs = host.getState()
+    return hs.requests.length > 0 || hs.players.some((p) => !!p.inputRequest)
+  }
+  const stopBlink = (): void => {
+    if (blinkTimer) clearInterval(blinkTimer)
+    blinkTimer = null
+    if (tray && !tray.isDestroyed()) tray.setImage(trayNormal)
+  }
+  const attention = (kind: 'joinRequest' | 'inputRequest'): void => {
+    if (settings.get().host.requestSound) win?.webContents.send(EVENT_CHANNEL, 'alert', { kind })
+    if (win?.isFocused() && win.isVisible()) return
+    win?.flashFrame(true)
+    if (blinkTimer || !tray) return
+    let on = false
+    blinkTimer = setInterval(() => {
+      on = !on
+      tray?.setImage(on ? trayAlert : trayNormal)
+    }, 650)
+  }
+  /** Запрос обработан (или отменён): мигание прекращается. */
+  const syncAttention = (): void => {
+    if (blinkTimer && !needsAttention()) {
+      stopBlink()
+      win?.flashFrame(false)
+    }
+  }
+
+  refreshTray()
+  host.on('state', refreshTray)
+  client.on('state', refreshTray)
+  settings.on('change', refreshTray)
+  updates.on('state', refreshTray)
 
   setInterval(() => {
     const next = detectRadmin()
@@ -525,6 +755,15 @@ void app.whenReady().then(() => {
   handle(IPC.hostCreateInvite, () => host.createInvite())
   handle(IPC.hostRespondInput, (id: string, grant: boolean) => host.respondInput(String(id), grant === true))
   handle(IPC.hostSetInputPaused, (paused: boolean) => host.setInputPaused(paused === true))
+  handle(IPC.hostResetGamepad, (id: string) => host.resetGamepad(String(id)))
+  handle(IPC.clientResetGamepad, () => client.resetGamepad())
+  handle(IPC.updateGetState, () => updates.getState())
+  handle(IPC.updateCheck, () => updates.check(true))
+  handle(IPC.updateDownload, () => updates.download())
+  handle(IPC.updateInstall, () => updates.install())
+  handle(IPC.updateSkip, (version: string) => {
+    if (typeof version === 'string') settings.update({ updates: { skipped: version } })
+  })
   handle(IPC.overlayToggleStats, async () => {
     const pid = client.streamPid
     if (!pid || !helper.available) return false
@@ -559,6 +798,9 @@ void app.whenReady().then(() => {
   })
 
   createWindow(settings.get())
+  // Окно стало активным: хост увидел запрос, мигание значка в трее больше не нужно.
+  win?.on('focus', () => stopBlink())
+  updates.start()
   // Крестик: если идёт хостинг или трансляция, по умолчанию прячем окно в трей, а не выходим.
   win?.on('session-end', () => {
     log('windows session ending: locking down')
@@ -589,7 +831,7 @@ void app.whenReady().then(() => {
     e.preventDefault()
     quitting = true
     globalShortcut.unregisterAll()
-    void Promise.race([Promise.all([host.stop(), client.cancel()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => {
+    void Promise.race([Promise.all([host.stop(), client.shutdown()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => {
       // Помощник возвращает маршрутизацию звука и выходит, когда закрывается его ввод.
       helper.stop()
       app.exit(0)

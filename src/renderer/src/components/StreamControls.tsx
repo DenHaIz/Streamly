@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NO_INPUT, type InputPerms } from '@shared/perms'
 import type { QualityProfile } from '@shared/types'
+import { useShallow } from 'zustand/react/shallow'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
@@ -20,6 +21,7 @@ export function StreamControls() {
       <VolumeRow />
       <ChatRow />
       <InputRow />
+      <GamepadRow />
       <QualityRow />
     </div>
   )
@@ -42,20 +44,32 @@ async function applyHostQuality(address: string | undefined, q: QualityProfile):
   await api().client.restartStream()
 }
 
-function VolumeRow() {
-  const { t } = useTranslation()
+/**
+ * Громкость трансляции: ползунок двигается сразу, а в настройки (и в Windows) значение уходит с паузой.
+ * Пока ползунок тянут, эхо прежних сохранений его не дёргает назад.
+ */
+export function useVolume(): [number, (v: number) => void] {
   const saved = useApp((s) => s.settings!.stream.volume)
   const update = useApp((s) => s.updateSettings)
   const [vol, setVol] = useState(saved)
   const timer = useRef<number | undefined>(undefined)
-  // Ползунок двигается сразу, а в настройки (и в Windows) значение уходит с небольшой паузой.
-  useEffect(() => setVol(saved), [saved])
+  const lastChange = useRef(0)
+  useEffect(() => {
+    if (Date.now() - lastChange.current > 700) setVol(saved)
+  }, [saved])
   useEffect(() => () => window.clearTimeout(timer.current), [])
   const change = (v: number): void => {
     setVol(v)
+    lastChange.current = Date.now()
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => void update({ stream: { volume: v } }), 90)
   }
+  return [vol, change]
+}
+
+function VolumeRow() {
+  const { t } = useTranslation()
+  const [vol, change] = useVolume()
   const Icon = vol === 0 ? VolumeX : vol < 50 ? Volume1 : Volume2
   return (
     <div className="sc-row">
@@ -119,7 +133,7 @@ function InputRow() {
       <div className="sc-hint">{t('stream.myInputHint')}</div>
       <AnimatePresence initial={false}>
         {paused && (
-          <motion.div className="sc-hint warn" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.div className="sc-hint warn" style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             {t('stream.pausedByHost')}
           </motion.div>
         )}
@@ -149,7 +163,7 @@ function InputRow() {
       </div>
       <AnimatePresence initial={false}>
         {locked.length > 0 && (
-          <motion.div className="sc-apply" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
+          <motion.div className="sc-apply" style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
             <span className={`sc-hint ${request === 'denied' ? 'warn' : ''}`}>
               {request === 'pending' ? t('stream.requestPending') : request === 'denied' ? t('stream.requestDenied') : t('stream.requestHint')}
             </span>
@@ -159,6 +173,59 @@ function InputRow() {
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  )
+}
+
+/**
+ * Геймпад двоится или завис: быстрый перезапуск трансляции (хост создаёт виртуальные геймпады заново)
+ * и режим «все геймпады как один» против двойных устройств (Steam Input, DS4Windows).
+ */
+function GamepadRow() {
+  const { t } = useTranslation()
+  const allowed = useApp((s) => !!s.client.perms?.gamepad)
+  const restarting = useApp((s) => !!s.client.restarting)
+  const single = useApp((s) => s.settings!.stream.singleGamepad)
+  const update = useApp((s) => s.updateSettings)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!restarting) setBusy(false)
+  }, [restarting])
+  const reset = (): void => {
+    setBusy(true)
+    void api()
+      .client.resetGamepad()
+      .then((ok) => !ok && setBusy(false))
+  }
+  return (
+    <div className="sc-block">
+      <div className="sc-row inner">
+        <span className="sc-icon">
+          <Gamepad2 size={18} />
+        </span>
+        <div className="sc-main">
+          <div className="sc-title">{t('stream.gamepadTitle')}</div>
+          <div className="sc-hint">{allowed ? t('stream.gamepadHint') : t('stream.gamepadOff')}</div>
+        </div>
+        <Button size="sm" icon={<RotateCw size={14} />} loading={busy && restarting} disabled={busy || !allowed} onClick={reset}>
+          {t('stream.gamepadReset')}
+        </Button>
+      </div>
+      <div className="sc-row inner">
+        <span className="sc-icon" />
+        <div className="sc-main">
+          <div className="sc-title">{t('settings.singleGamepad')}</div>
+          <div className="sc-hint">{t('settings.singleGamepadHint')}</div>
+        </div>
+        <Switch
+          checked={single}
+          label={t('settings.singleGamepad')}
+          onChange={(v) => {
+            // Режим меняется только с перезапуском трансляции: делаем его сразу.
+            void update({ stream: { singleGamepad: v } }).then(() => reset())
+          }}
+        />
+      </div>
     </div>
   )
 }
@@ -197,7 +264,7 @@ function QualityRow() {
       )}
       <AnimatePresence initial={false}>
         {((!auto && choice !== applied) || restarting) && (
-          <motion.div className="sc-apply" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
+          <motion.div className="sc-apply" style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
             <span className="sc-hint">{restarting ? t('stream.restarting') : t('stream.applyHint')}</span>
             <Button
               size="sm"
@@ -244,7 +311,7 @@ function NetworkWarning() {
   return (
     <AnimatePresence initial={false}>
       {text && (
-        <motion.div className={`sc-warning ${autoLowered && !poor && !unstable && !reconnecting ? 'info' : ''}`} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
+        <motion.div className={`sc-warning ${autoLowered && !poor && !unstable && !reconnecting ? 'info' : ''}`} style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
           {reconnecting ? <RotateCw size={17} className="spin" /> : <TriangleAlert size={17} />}
           <span style={{ flex: 1 }}>{text}</span>
           {!auto && !economy && !reconnecting && (poor || unstable) && (
@@ -264,7 +331,19 @@ function NetworkWarning() {
  */
 export function StreamStats({ withMoonlight }: { withMoonlight?: boolean }) {
   const { t } = useTranslation()
-  const c = useApp((s) => s.client)
+  // Только поля статистики: остальное состояние клиента не перерисовывает блок.
+  const c = useApp(
+    useShallow((s) => ({
+      rttMs: s.client.rttMs,
+      jitterMs: s.client.jitterMs,
+      speedMbps: s.client.speedMbps,
+      active: s.client.active,
+      policy: s.client.policy,
+      poorNetwork: s.client.poorNetwork,
+      wifi: s.client.wifi,
+      relaySuspect: s.client.relaySuspect
+    }))
+  )
   const enc = c.policy?.encoder
   const items: { label: string; value: string; tone?: 'warn' | 'ok' }[] = [
     {

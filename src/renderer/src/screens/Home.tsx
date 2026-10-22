@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useApp } from '@/store/app'
 import { IconButton, riseIn, softSpring, stagger } from '@/components/ui'
+import { UpdateBanner } from '@/components/Update'
 
 function BigAction({ icon, title, text, onClick, tone }: { icon: ReactNode; title: string; text: string; onClick: () => void; tone: 'violet' | 'cyan' }) {
   return (
@@ -31,11 +32,13 @@ function BigAction({ icon, title, text, onClick, tone }: { icon: ReactNode; titl
 export function Home() {
   const { t } = useTranslation()
   const go = useApp((s) => s.go)
-  const host = useApp((s) => s.host)
-  const client = useApp((s) => s.client)
-  const hosting = host?.phase === 'running'
-  const streaming = client.phase === 'streaming'
-  const inSession = streaming || ['launching', 'pairing', 'waitingApproval', 'connecting'].includes(client.phase)
+  // Только нужные поля: задержка и поток обновляются каждые несколько секунд и не должны перерисовывать главную.
+  const hosting = useApp((s) => s.host?.phase === 'running')
+  const playerCount = useApp((s) => s.host?.players.length ?? 0)
+  const phase = useApp((s) => s.client.phase)
+  const hostName = useApp((s) => s.client.host?.name ?? s.client.host?.address ?? '')
+  const streaming = phase === 'streaming'
+  const inSession = streaming || ['launching', 'pairing', 'waitingApproval', 'connecting'].includes(phase)
 
   return (
     <div className="page-inner home">
@@ -50,6 +53,8 @@ export function Home() {
         </IconButton>
       </div>
 
+      <UpdateBanner />
+
       <AnimatePresence>
         {(hosting || inSession) && (
           <motion.button
@@ -58,6 +63,7 @@ export function Home() {
             animate={{ opacity: 1, height: 'auto', marginBottom: 18 }}
             exit={{ opacity: 0, height: 0, marginBottom: 0 }}
             transition={softSpring}
+            style={{ overflow: 'hidden' }}
             onClick={() => go(hosting ? 'host' : 'connect')}
           >
             {hosting || streaming ? (
@@ -72,10 +78,10 @@ export function Home() {
             )}
             <span style={{ fontWeight: 600 }}>
               {hosting
-                ? t('home.hostRunning', { count: host?.players.length ?? 0 })
+                ? t('home.hostRunning', { count: playerCount })
                 : streaming
-                  ? t('home.streaming', { name: client.host?.name ?? '' })
-                  : t('home.connectingTo', { name: client.host?.name ?? client.host?.address ?? '' })}
+                  ? t('home.streaming', { name: hostName })
+                  : t('home.connectingTo', { name: hostName })}
             </span>
             <span className="spacer" />
             <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>

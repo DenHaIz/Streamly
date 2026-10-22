@@ -206,17 +206,17 @@ function Progress({ client }: { client: ClientState }) {
       </div>
       <AnimatePresence mode="wait">
         {client.phase === 'waitingApproval' && (
-          <motion.p key="approval" className="muted" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.p key="approval" className="muted" initial={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 8, marginBottom: 0 }} exit={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} style={{ overflow: 'hidden' }}>
             {t('connect.approvalHint')}
           </motion.p>
         )}
         {client.measuring && (
-          <motion.p key="measuring" className="muted" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.p key="measuring" className="muted" initial={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 8, marginBottom: 0 }} exit={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} style={{ overflow: 'hidden' }}>
             {t('connect.measuring')}
           </motion.p>
         )}
         {!client.measuring && (client.phase === 'pairing' || client.phase === 'launching') && (
-          <motion.p key="firewall" className="faint" style={{ fontSize: 12.5 }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.p key="firewall" className="faint" initial={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 8, marginBottom: 0 }} exit={{ opacity: 0, height: 0, marginTop: 0, marginBottom: 0 }} style={{ overflow: 'hidden', fontSize: 12.5 }}>
             {t('connect.firewallHint')}
           </motion.p>
         )}

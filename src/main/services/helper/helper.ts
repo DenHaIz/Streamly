@@ -66,6 +66,10 @@ export class Helper extends EventEmitter {
   private seq = 0
   private readonly pending = new Map<number, Pending>()
   private lastStart = 0
+  /** Таймауты подряд: помощник, видимо, завис на одном вызове (он выполняет их по очереди). */
+  private timeouts = 0
+  /** Падения подряд вскоре после запуска: перезапуск маршрутизации звука с нарастающей паузой. */
+  private crashes = 0
   private routerOptions: RouterOptions | null = null
   routerState: RouterState | null = null
 
@@ -98,8 +102,11 @@ export class Helper extends EventEmitter {
         this.pending.delete(id)
       }
       this.log(`[helper] exited with ${code}`)
-      // Маршрутизация звука должна пережить падение помощника.
-      if (this.routerOptions?.enabled) setTimeout(() => void this.router(this.routerOptions!).catch(() => undefined), 5500)
+      // Проработал больше двух минут — значит, это не падение при старте: счётчик с нуля.
+      this.crashes = Date.now() - this.lastStart > 120_000 ? 0 : this.crashes + 1
+      // Маршрутизация звука должна пережить падение помощника, но без бесконечного цикла перезапусков.
+      const delay = Math.min(5500 * 2 ** Math.max(0, this.crashes - 1), 60_000)
+      if (this.routerOptions?.enabled) setTimeout(() => void this.router(this.routerOptions!).catch(() => undefined), delay)
     })
     proc.on('error', (e) => this.log('[helper] spawn failed', e))
     return proc
@@ -123,6 +130,7 @@ export class Helper extends EventEmitter {
     if (!p) return
     this.pending.delete(msg.id)
     clearTimeout(p.timer)
+    this.timeouts = 0
     if (msg.ok) p.resolve(msg.result)
     else p.reject(new Error(String(msg.error)))
   }
@@ -139,6 +147,12 @@ export class Helper extends EventEmitter {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`helper ${cmd}: timeout`))
+        // Два таймаута подряд: помощник завис, и все следующие вызовы стояли бы за ним. Перезапускаем.
+        if (++this.timeouts >= 2 && this.proc === proc) {
+          this.log('[helper] not responding: restarting')
+          this.timeouts = 0
+          proc.kill()
+        }
       }, timeoutMs)
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
       proc.stdin?.write(JSON.stringify({ id, cmd, ...args }) + '\n')

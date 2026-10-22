@@ -11,7 +11,8 @@ import type {
   Invite,
   RadminStatus,
   Settings,
-  TrustedFriendView
+  TrustedFriendView,
+  UpdateState
 } from './types'
 
 export type JoinDecision = 'allow' | 'trust' | 'deny'
@@ -26,7 +27,14 @@ export interface BridgeEvents {
   overlay: { open: boolean; screens: number }
   /** Открыта ссылка-приглашение (или найдена в буфере обмена). */
   invite: Invite
+  update: UpdateState
+  /** Открыть экран (пункт меню в трее). */
+  navigate: NavTarget
+  /** Хосту нужно внимание (запрос на подключение, просьба об управлении): звук в интерфейсе. */
+  alert: { kind: 'joinRequest' | 'inputRequest' }
 }
+
+export type NavTarget = 'home' | 'host' | 'connect' | 'settings' | 'about'
 
 export type BridgeEvent = keyof BridgeEvents
 
@@ -45,6 +53,17 @@ export interface StreamlyBridge {
   copyDiagnostics(): Promise<void>
   /** Ссылка-приглашение в буфере обмена (если есть и ещё не предлагалась). */
   checkInvite(): Promise<Invite | null>
+
+  /** Обновления через GitHub Releases: проверка, загрузка и установка — только по действию пользователя. */
+  update: {
+    getState(): Promise<UpdateState>
+    check(): Promise<UpdateState>
+    download(): Promise<void>
+    /** Закрыть Streamly и установить скачанное обновление. */
+    install(): Promise<void>
+    /** Не предлагать эту версию. */
+    skip(version: string): Promise<void>
+  }
 
   host: {
     getState(): Promise<HostState>
@@ -72,6 +91,8 @@ export interface StreamlyBridge {
     respondInput(deviceId: string, grant: boolean): Promise<void>
     /** Забрать ввод у всех игроков (или вернуть). */
     setInputPaused(paused: boolean): Promise<void>
+    /** Переподключить геймпады игрока (двойной или зависший геймпад). */
+    resetGamepad(deviceId: string): Promise<void>
   }
 
   client: {
@@ -90,6 +111,8 @@ export interface StreamlyBridge {
     restartStream(): Promise<boolean>
     /** Попросить у хоста ввод, который он выключил. */
     requestInput(perms: Partial<InputPerms>): Promise<void>
+    /** Переподключить свои геймпады: быстрый перезапуск трансляции, хост создаёт геймпады заново. */
+    resetGamepad(): Promise<boolean>
   }
 
   /** Меню во время игры (Alt+F2). */
@@ -117,6 +140,13 @@ export const IPC = {
   openLogs: 'app:openLogs',
   copyDiagnostics: 'app:diagnostics',
   checkInvite: 'app:checkInvite',
+  updateGetState: 'update:getState',
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  updateInstall: 'update:install',
+  updateSkip: 'update:skip',
+  hostResetGamepad: 'host:resetGamepad',
+  clientResetGamepad: 'client:resetGamepad',
   hostGetState: 'host:getState',
   hostStart: 'host:start',
   hostInstall: 'host:install',

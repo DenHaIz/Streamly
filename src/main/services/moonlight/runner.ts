@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+/** taskkill по полному пути: PATH у пользователя может быть каким угодно. */
+const TASKKILL = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe')
 import { APOLLO_APP } from '@shared/protocol'
 import type { StreamPolicy, StreamSettings } from '@shared/types'
 
@@ -88,7 +91,8 @@ export function buildStreamArgs(host: string, s: StreamSettings, native?: { widt
   // Геймпад работает и когда окно трансляции не в фокусе: меню Alt+F2, второй монитор.
   args.push('--background-gamepad')
   // Рабочий стол общий для всех: уход одного игрока не должен закрывать его у остальных.
-  args.push('--no-quit-after', '--no-game-optimization', '--multi-controller', '--keep-awake')
+  // «Один геймпад»: все геймпады игрока управляют первым — против двойных устройств (Steam Input, DS4Windows).
+  args.push('--no-quit-after', '--no-game-optimization', s.singleGamepad ? '--no-multi-controller' : '--multi-controller', '--keep-awake')
   return args
 }
 
@@ -134,21 +138,39 @@ export class MoonlightRunner {
     if (this.runs.length > 6) this.runs.shift()
     const child = spawn(this.exePath, args, { cwd: this.dataDir, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
     // Потоки обязательно читаем, иначе при заполнении буфера Moonlight зависнет на записи.
-    const collect = (chunk: Buffer): void => {
-      for (const line of chunk.toString('utf8').split(/\r?\n/)) {
-        if (!line.trim()) continue
-        run.lines.push(line)
-        for (const cb of subscribers) cb(line)
+    // У каждого потока свой остаток: строка, разрезанная между кусками, не теряется.
+    const collector = (): ((chunk: Buffer | null) => void) => {
+      let rest = ''
+      return (chunk) => {
+        const text = rest + (chunk ? chunk.toString('utf8') : '\n')
+        const parts = text.split(/\r?\n/)
+        rest = parts.pop() ?? ''
+        for (const line of parts) {
+          if (!line.trim()) continue
+          run.lines.push(line)
+          for (const cb of subscribers) cb(line)
+        }
+        if (run.lines.length > MAX_LOG_LINES) run.lines.splice(0, run.lines.length - MAX_LOG_LINES)
       }
-      if (run.lines.length > MAX_LOG_LINES) run.lines.splice(0, run.lines.length - MAX_LOG_LINES)
     }
-    child.stdout?.on('data', collect)
-    child.stderr?.on('data', collect)
+    const out = collector()
+    const err = collector()
+    child.stdout?.on('data', out)
+    child.stderr?.on('data', err)
     const exited = new Promise<number>((resolve) => {
-      child.once('exit', (code) => {
+      // 'close' приходит после того, как потоки дочитаны: вывод `list` к этому моменту полный.
+      let done = false
+      const finish = (code: number | null): void => {
+        if (done) return
+        done = true
+        out(null)
+        err(null)
         this.saveLog(run, code)
         resolve(code ?? -1)
-      })
+      }
+      child.once('close', finish)
+      // Если потоки держит кто-то ещё (дочерний процесс Moonlight), 'close' может не прийти: страховка.
+      child.once('exit', (code) => setTimeout(() => finish(code), 2000))
       child.once('error', (e) => {
         run.lines.push(`spawn error: ${e.message}`)
         resolve(-1)
@@ -164,7 +186,7 @@ export class MoonlightRunner {
       close: () => {
         if (child.exitCode !== null || child.killed || !child.pid) return
         // taskkill без /F отправляет окну WM_CLOSE: Moonlight завершает сессию, как по крестику.
-        spawn('taskkill', ['/PID', String(child.pid)], { windowsHide: true, stdio: 'ignore' }).on('error', kill)
+        spawn(TASKKILL, ['/PID', String(child.pid)], { windowsHide: true, stdio: 'ignore' }).on('error', kill)
         setTimeout(kill, 4000)
       },
       output: () => [...run.lines],

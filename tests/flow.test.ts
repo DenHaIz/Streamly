@@ -226,7 +226,7 @@ function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
     ...extra
   })
 
-  const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number } = {}) => {
+  const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number; appVersion?: string } = {}) => {
     const settings = new SettingsService(tmp(), 'ru')
     settings.update({ nickname: nick })
     const moonlight = new FakeMoonlight(apollo)
@@ -234,7 +234,7 @@ function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
       settings,
       secrets: new SecretsService(tmp()),
       moonlight,
-      appVersion: 'test',
+      appVersion: opts.appVersion ?? 'test',
       probe: async () => [],
       neighbors: async () => [],
       signalingPort: port,
@@ -675,5 +675,90 @@ describe('host ↔ client flow', () => {
     cleanups.push(() => host.stop())
     await host.start()
     expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '3', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '30', max_bitrate: '30000' })
+  }, 15000)
+
+  it('the host reconnects a stuck gamepad: a new client restarts the stream, an old one is dropped in Apollo', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const a = makeClient('Вася', { appVersion: '0.4.0' })
+    cleanups.push(() => a.client.cancel())
+    await a.client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => a.client.getState().phase === 'streaming')
+    await host.resetGamepad(host.getState().players[0].deviceId)
+    await waitFor(() => a.moonlight.streams === 2 && a.client.getState().phase === 'streaming' && !a.client.getState().restarting)
+    expect(host.getState().requests).toHaveLength(0)
+
+    // Игрок со старой версией Streamly сообщение не поймёт: его сессию в Apollo просто разрываем.
+    const b = makeClient('Петя', { appVersion: '0.3.0' })
+    cleanups.push(() => b.client.cancel())
+    await b.client.connect('127.0.0.1')
+    const req2 = await waitFor(() => host.getState().requests[0])
+    await host.respond(req2.id, 'allow')
+    await waitFor(() => b.client.getState().phase === 'streaming')
+    const petya = host.getState().players.find((p) => p.nickname === 'Петя')!
+    const uuid = b.moonlight.uuid
+    await host.resetGamepad(petya.deviceId)
+    expect(apollo.clients.find((c) => c.uuid === uuid)?.connected).toBe(false)
+  }, 15000)
+
+  it('a player reconnects their own gamepad from the in-game menu', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    expect(client.resetGamepad()).toBe(false)
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    expect(client.resetGamepad()).toBe(true)
+    await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming')
+  }, 15000)
+
+  it('a kicked player cannot come back with the invite link, the link changes', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const inv = host.createInvite()!
+    const code = new URL(inv.link).searchParams.get('code')!
+    const a = makeClient('Вася')
+    cleanups.push(() => a.client.cancel())
+    await a.client.connect('127.0.0.1', { inviteCode: code })
+    await waitFor(() => a.client.getState().phase === 'streaming')
+    await host.kick(host.getState().players[0].deviceId)
+    await waitFor(() => a.client.getState().phase === 'error')
+    expect(host.createInvite()!.link).not.toBe(inv.link)
+
+    // Тот же ПК с новым устройством и старой ссылкой: только через подтверждение хоста.
+    const b = makeClient('Вася2')
+    cleanups.push(() => b.client.cancel())
+    await b.client.connect('127.0.0.1', { inviteCode: code })
+    await waitFor(() => host.getState().requests.length === 1)
+    expect(b.client.getState().phase).toBe('waitingApproval')
+  }, 15000)
+
+  it('a host that accepts the connection but never answers does not hang the client', async () => {
+    const { WebSocketServer } = await import('ws')
+    const wss = new WebSocketServer({ port: 47_990, host: '127.0.0.1' })
+    cleanups.push(() => new Promise<void>((r) => wss.close(() => r())))
+    const settings = new SettingsService(tmp(), 'ru')
+    const client = new ClientController({
+      settings,
+      secrets: new SecretsService(tmp()),
+      moonlight: new FakeMoonlight(new FakeApollo()),
+      appVersion: 'test',
+      probe: async () => [],
+      neighbors: async () => [],
+      signalingPort: 47_990,
+      connectTimeoutMs: 300
+    })
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    await waitFor(() => client.getState().phase === 'error')
+    expect(client.getState().error).toBe('host_not_hosting')
   }, 15000)
 })

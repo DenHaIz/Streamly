@@ -372,11 +372,14 @@
 
 .list {
   display: grid;
+  /* minmax(0, 1fr): длинная карточка не растягивает колонку шире страницы. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
 .request {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
@@ -1271,6 +1274,14 @@ html.overlay-mode body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  /* Кнопки «В игру» и «Отключиться» всегда видны, даже когда меню прокручивается. */
+  position: sticky;
+  bottom: -14px;
+  margin: 0 -20px;
+  padding: 10px 20px 14px;
+  background: var(--surface-solid);
+  border-top: 1px solid var(--border);
+  z-index: 1;
 }
 
 .overlay-actions.single .btn-primary,
@@ -1398,4 +1409,202 @@ html.overlay-mode body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Строки внутри блока меню (геймпад): без своих разделителей. */
+.sc-block .sc-row.inner {
+  border-bottom: 0;
+  padding: 0 2px;
+}
+
+.sc-block .sc-row.inner .sc-icon:empty {
+  background: transparent;
+}
+
+/* ---------- Запросы на подключение: кнопки переносятся, а не обрезаются ---------- */
+.request-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+@media (max-width: 1000px) {
+  .request-actions .collapsible {
+    display: none;
+  }
+  .request-actions .btn:has(.collapsible) {
+    padding: 0 10px;
+  }
+}
+
+/* ---------- Настройки: расширенные параметры ---------- */
+.settings-stack {
+  display: grid;
+  gap: 16px;
+}
+
+/* Свёрнутые блоки внутри сетки не должны давать лишний зазор. */
+.settings-stack > .collapse {
+  margin-top: -16px;
+}
+
+.settings-stack > .collapse > .card {
+  margin-top: 16px;
+}
+
+.advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 560;
+  font-size: 13px;
+}
+
+.advanced-card {
+  border-style: dashed;
+}
+
+.preset-block {
+  margin-top: 10px;
+  transition: opacity 0.25s var(--ease);
+}
+
+.row-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kbd-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: 560 12.5px var(--font);
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.warn-text {
+  color: var(--warning-text);
+}
+
+/* ---------- Обновления ---------- */
+.update-banner {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.update-banner-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+}
+
+.update-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.update-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.update-side {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.update-later {
+  display: flex;
+  gap: 14px;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-notes {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.update-found {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 4px 0 12px;
+}
+
+.update-progress {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-progress-bar {
+  height: 6px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: var(--accent-grad);
+  transform-origin: left center;
+}
+
+/* В баннере подсказка под кнопкой: текст о версии не сжимается. */
+.update-side .update-actions {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.update-side .update-actions .faint {
+  max-width: 240px;
+  font-size: 12px;
+  text-align: right;
 }

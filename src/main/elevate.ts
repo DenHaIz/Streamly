@@ -50,7 +50,8 @@ export async function runElevatedScript(
     `$ProgressPreference = 'SilentlyContinue'; ` +
     `try { $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden ` +
     `-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${inner}'); exit $p.ExitCode } ` +
-    `catch { if ($_.Exception.NativeErrorCode -eq ${UAC_CANCELLED} -or $_.Exception.HResult -eq -2147023673) { exit ${UAC_CANCELLED} }; ` +
+    // PowerShell 5.1 оборачивает отказ в UAC в InvalidOperationException: код 1223 ищем по всей цепочке исключений.
+    `catch { $e = $_.Exception; while ($e) { if ($e.NativeErrorCode -eq ${UAC_CANCELLED} -or $e.HResult -eq -2147023673 -or $e.Message -match 'canceled by the user|cancelled by the user|отменена пользователем') { exit ${UAC_CANCELLED} }; $e = $e.InnerException }; ` +
     `[Console]::Error.WriteLine($_.Exception.Message); exit 2 }`
 
   try {

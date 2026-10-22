@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
-import { Avatar, Button, Modal } from '@/components/ui'
+import { Avatar, Button, Modal, useLastNonNull } from '@/components/ui'
 
 /**
  * Приглашение от хоста: ссылка streamly://join/… (открыта из браузера или «Выполнить»)
@@ -11,7 +11,8 @@ import { Avatar, Button, Modal } from '@/components/ui'
  */
 export function InviteModal() {
   const { t } = useTranslation()
-  const invite = useApp((s) => s.invite)
+  const current = useApp((s) => s.invite)
+  const invite = useLastNonNull(current)
   const setInvite = useApp((s) => s.setInvite)
 
   useEffect(() => {
@@ -34,14 +35,14 @@ export function InviteModal() {
   }, [setInvite])
 
   const join = (): void => {
-    if (!invite) return
+    if (!current || !invite) return
     setInvite(null)
     useApp.getState().go('connect')
     void api().client.connect(invite.address, invite.code)
   }
 
   return (
-    <Modal open={!!invite} onClose={() => setInvite(null)}>
+    <Modal open={!!current} onClose={() => setInvite(null)}>
       {invite && (
         <div style={{ textAlign: 'center' }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>

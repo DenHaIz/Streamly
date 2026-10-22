@@ -18,7 +18,10 @@ export function Overlay() {
   useResolvedTheme()
   const { t } = useTranslation()
   const overlay = useApp((s) => s.overlay)
-  const client = useApp((s) => s.client)
+  // Отдельные поля, а не всё состояние: меню поверх игры не перерисовывается от каждого замера задержки.
+  const hostName = useApp((s) => s.client.host?.name)
+  const startedAt = useApp((s) => s.client.startedAt)
+  const rttMs = useApp((s) => s.client.rttMs)
   const [confirmLeave, setConfirmLeave] = useState(false)
   const leaveTimer = useRef<number | undefined>(undefined)
 
@@ -68,11 +71,11 @@ export function Overlay() {
               <header className="overlay-head">
                 <PixelLogo size={26} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="overlay-host">{client.host?.name ?? t('overlay.title')}</div>
+                  <div className="overlay-host">{hostName ?? t('overlay.title')}</div>
                   <div className="overlay-sub">
                     <Clock size={12} />
-                    <Elapsed since={client.startedAt} />
-                    {client.rttMs !== undefined && <RttBadge ms={client.rttMs} />}
+                    <Elapsed since={startedAt} />
+                    {rttMs !== undefined && <RttBadge ms={rttMs} />}
                   </div>
                 </div>
                 <kbd className="kbd">Alt+F2</kbd>

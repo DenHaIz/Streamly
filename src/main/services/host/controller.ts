@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   sanitizeNickname,
   SIGNALING_PORT,
+  versionAtLeast,
   type ClientMessage,
   type HostMessage,
   type PairFailReason
@@ -116,6 +117,8 @@ interface Peer {
   rttMs?: number
   deviceId?: string
   nickname: string
+  /** Версия Streamly у игрока (новые возможности — только у тех, кто их понимает). */
+  appVersion?: string
   trustToken?: string
   admitted: boolean
   requestId?: string
@@ -233,6 +236,10 @@ export class HostController extends EventEmitter {
   private activeLaunch: { peerId: string; since: number } | null = null
   private emitTimer: NodeJS.Timeout | null = null
   private lastPollError = 0
+  /** Опросы Apollo подряд с ошибкой: несколько подряд — Apollo упал, пробуем поднять службу. */
+  private pollFailures = 0
+  private lastServiceKick = 0
+  private apolloDown = false
   private serviceControl = false
   gamepadDriver = true
   /** Мониторы хоста по логу Apollo. */
@@ -317,7 +324,8 @@ export class HostController extends EventEmitter {
       encoder: this.encoder,
       wrongGpu: this.wrongGpu(),
       uploadMbps: this.phase === 'running' ? this.upload?.mbps : undefined,
-      inputPaused: this.inputPaused
+      inputPaused: this.inputPaused,
+      apolloDown: this.apolloDown || undefined
     }
   }
 
@@ -505,7 +513,9 @@ export class HostController extends EventEmitter {
     }
     this.check(gen)
 
-    const changed = await this.d.apollo.patchConfig(this.apolloConfig())
+    // Подпись того, что реально записали: настройки, изменённые во время перезапуска, применятся следующим разом.
+    const cfg = this.apolloConfig()
+    const changed = await this.d.apollo.patchConfig(cfg)
     this.check(gen)
     if (changed) {
       await this.d.apollo.restart()
@@ -514,8 +524,8 @@ export class HostController extends EventEmitter {
       await this.d.apollo.login(this.d.secrets.get().apollo)
       this.check(gen)
     }
-    this.appliedConfig = this.configSig()
-    this.pendingRestart = false
+    this.appliedConfig = JSON.stringify(cfg)
+    this.pendingRestart = this.configSig() !== this.appliedConfig
     await this.refreshDisplays()
     this.check(gen)
     // Звук настраиваем до допуска игроков: от этого зависят условия трансляции, которые они получат.
@@ -555,6 +565,9 @@ export class HostController extends EventEmitter {
       max_bitrate: String(h.maxBitrateKbps === -1 ? AUTO_BITRATE_CAP_MAX : h.maxBitrateKbps),
       // Избыточные пакеты: потеря части пакетов восстанавливается без пропуска кадра.
       fec_percentage: String(FEC[h.lossProtection]),
+      // Одновременных трансляций (в Sunshine по умолчанию одна). Лимит игроков держит сам Streamly,
+      // поэтому здесь максимум: смена лимита в настройках не перезапускает Apollo.
+      channels: '4',
       ...encoderConfig(h)
     }
   }
@@ -612,7 +625,9 @@ export class HostController extends EventEmitter {
       }
       return
     }
-    if (this.appOpen || this.activeLaunch) {
+    // Перезапуск Apollo оборвал бы запуск трансляции или сопряжение: откладываем до свободной минуты.
+    const busy = this.appOpen || !!this.activeLaunch || this.launchQueue.length > 0 || [...this.peers.values()].some((p) => p.pairing)
+    if (busy) {
       if (!this.pendingRestart) {
         this.pendingRestart = true
         this.emitState()
@@ -627,8 +642,9 @@ export class HostController extends EventEmitter {
     if (this.reconfiguring || this.phase !== 'running') return
     const gen = this.gen
     this.reconfiguring = true
+    const cfg = this.apolloConfig()
     try {
-      if (await this.d.apollo.patchConfig(this.apolloConfig())) {
+      if (await this.d.apollo.patchConfig(cfg)) {
         this.check(gen)
         await this.d.apollo.restart()
         await sleep(1500)
@@ -637,14 +653,22 @@ export class HostController extends EventEmitter {
         this.check(gen)
         await this.refreshDisplays()
       }
-      this.appliedConfig = this.configSig()
-      this.pendingRestart = false
+      this.appliedConfig = JSON.stringify(cfg)
+      // Пока Apollo перезапускался, настройки могли снова поменяться: применим при следующей возможности.
+      this.pendingRestart = this.configSig() !== this.appliedConfig
       this.log('apollo reconfigured')
       this.emitState()
     } catch (e) {
-      if (!(e instanceof Cancelled)) this.log('reconfigure failed', e)
+      if (!(e instanceof Cancelled)) {
+        this.log('reconfigure failed', e)
+        // Не получилось — повторим, когда все уйдут (idleCheck).
+        this.pendingRestart = true
+        this.emitState()
+      }
     } finally {
       this.reconfiguring = false
+      // Запуски, которые ждали, пока Apollo перезапускается.
+      if (this.phase === 'running') this.pumpLaunches()
     }
   }
 
@@ -768,6 +792,8 @@ export class HostController extends EventEmitter {
         if (p.admitted) changed = true
         // Запрос, который хост так и не рассмотрел, не держит соединение вечно.
         if (!p.admitted && p.requestedAt && Date.now() - p.requestedAt > (this.d.requestTimeoutMs ?? 180_000)) p.ws.close()
+        // Соединение без запроса (поздоровался и молчит) занимало бы место в очереди неодобренных.
+        if (!p.admitted && !p.requestId && Date.now() - p.since > 30_000) p.ws.close()
       }
       if (changed) this.emitState()
     }, 5_000)
@@ -801,12 +827,18 @@ export class HostController extends EventEmitter {
       this.send(p, { t: 'hostStopping' })
       p.ws.close()
     }
+    // Друг с упавшим ПК или Radmin не ответит на закрытие, и ws ждал бы его 30 с: через секунду обрываем.
+    const sockets = [...(this.wss?.clients ?? [])]
+    const cut = setTimeout(() => sockets.forEach((s) => s.terminate()), 1000)
     this.peers.clear()
     this.launchQueue = []
     this.activeLaunch = null
     this.discovery?.stop()
     this.discovery = null
-    await new Promise<void>((r) => (this.wss ? this.wss.close(() => r()) : r()))
+    const wss = this.wss
+    await Promise.race([new Promise<void>((r) => (wss ? wss.close(() => r()) : r())), sleep(3000)])
+    clearTimeout(cut)
+    sockets.forEach((s) => s.terminate())
     this.wss = null
     // Дожидаемся опроса, который мог уже начаться, иначе он вернул бы права после блокировки.
     await this.polling
@@ -824,6 +856,8 @@ export class HostController extends EventEmitter {
     this.invite = null
     this.inputPaused = false
     this.upload = null
+    this.apolloDown = false
+    this.pollFailures = 0
     // Служба Apollo нужна только на время хостинга: после перезагрузки ПК она сама не запустится.
     if (wasActive && this.serviceControl) await this.d.installer.stopService().catch(() => false)
     this.starting = false
@@ -879,9 +913,16 @@ export class HostController extends EventEmitter {
       // Пока Apollo недоступен, не засоряем лог каждые 2 с.
       if (Date.now() - this.lastPollError > 30_000) this.log('poll failed', e instanceof Error ? e.message : e)
       this.lastPollError = Date.now()
+      await this.onApolloFailure(gen)
       return
     }
     if (gen !== this.gen) return
+    if (this.apolloDown || this.pollFailures) {
+      if (this.apolloDown) this.log('apollo is back')
+      this.pollFailures = 0
+      this.apolloDown = false
+      this.emitState()
+    }
     const byUuid = new Map(clients.map((c) => [c.uuid, c]))
     const known = new Set<string>()
     let changed = false
@@ -911,6 +952,26 @@ export class HostController extends EventEmitter {
     if (await this.measureUpload()) changed = true
     if (changed) this.emitState()
     await this.idleCheck(clients.some((c) => c.connected && known.has(c.uuid)), gen)
+  }
+
+  /**
+   * Apollo не отвечает несколько опросов подряд (служба упала или зависла): показываем это хосту
+   * и пробуем запустить службу снова (не чаще раза в минуту). Во время перезапуска с новыми настройками — норма.
+   */
+  private async onApolloFailure(gen: number): Promise<void> {
+    if (this.reconfiguring || gen !== this.gen) return
+    this.pollFailures++
+    if (this.pollFailures < 5) return
+    if (!this.apolloDown) {
+      this.apolloDown = true
+      this.log('apollo stopped responding')
+      this.emitState()
+    }
+    if (Date.now() - this.lastServiceKick < 60_000) return
+    this.lastServiceKick = Date.now()
+    const ok = await this.d.installer.startService().catch(() => false)
+    this.log(`apollo service restart: ${ok ? 'ok' : 'failed'}`)
+    if (ok && gen === this.gen) await this.d.apollo.login().catch(() => undefined)
   }
 
   /** Исходящий поток хоста по счётчику адаптера Radmin. true — значение заметно изменилось. */
@@ -1044,6 +1105,7 @@ export class HostController extends EventEmitter {
       // иначе кто угодно с чужим deviceId мог бы выкинуть друга из игры.
       peer.deviceId = msg.deviceId
       peer.nickname = sanitizeNickname(msg.nickname)
+      peer.appVersion = msg.appVersion
       peer.trustToken = msg.trustToken
       peer.inviteCode = msg.inviteCode
       return this.send(peer, {
@@ -1068,11 +1130,12 @@ export class HostController extends EventEmitter {
           return this.send(peer, { t: 'joinDenied', reason: 'full' })
         }
         const f = this.friend(deviceId)
-        if (!this.kicked.has(deviceId) && f?.trusted && f.tokenHash && peer.trustToken && sha256(peer.trustToken) === f.tokenHash) {
+        const kicked = this.kicked.has(deviceId) || this.kicked.has(`a:${peer.address}`)
+        if (!kicked && f?.trusted && f.tokenHash && peer.trustToken && sha256(peer.trustToken) === f.tokenHash) {
           return this.admit(peer, false)
         }
         // Ссылка-приглашение хоста: входит без подтверждения (если это не выключено в настройках).
-        if (!this.kicked.has(deviceId) && this.validInvite(peer.inviteCode) && this.d.settings.get().host.inviteAutoAdmit) {
+        if (!kicked && this.validInvite(peer.inviteCode) && this.d.settings.get().host.inviteAutoAdmit) {
           peer.viaInvite = true
           this.log(`${peer.nickname} joined with the invite link`)
           this.emit('inviteJoin', { nickname: peer.nickname })
@@ -1175,6 +1238,8 @@ export class HostController extends EventEmitter {
   }
 
   private pumpLaunches(): void {
+    // Apollo перезапускается: Moonlight подключился бы к выключенному хосту.
+    if (this.reconfiguring) return
     const a = this.activeLaunch
     if (a) {
       const p = this.peers.get(a.peerId)
@@ -1232,6 +1297,7 @@ export class HostController extends EventEmitter {
       return
     }
     this.kicked.delete(peer.deviceId)
+    this.kicked.delete(`a:${peer.address}`)
     await this.admit(peer, decision === 'trust')
   }
 
@@ -1261,6 +1327,8 @@ export class HostController extends EventEmitter {
       }
     }
     let token: string | undefined
+    const before = this.friend(deviceId)
+    const prevTrust = { trusted: before?.trusted ?? false, tokenHash: before?.tokenHash }
     this.d.secrets.update((s) => {
       const prev = Object.hasOwn(s.friends, deviceId) ? s.friends[deviceId] : undefined
       const f: TrustedFriend = prev ?? {
@@ -1289,6 +1357,13 @@ export class HostController extends EventEmitter {
       const clients = await this.listClientsRetry()
       if (!clients) {
         // Apollo не отвечает: не ломаем рабочее сопряжение, просим подключиться чуть позже.
+        // Новое доверие так и не дошло до игрока: возвращаем как было, иначе токен в его руках устарел бы.
+        if (token) {
+          this.d.secrets.update((s) => {
+            const ff = Object.hasOwn(s.friends, deviceId) ? s.friends[deviceId] : undefined
+            if (ff) Object.assign(ff, prevTrust)
+          })
+        }
         peer.admitted = false
         this.send(peer, { t: 'joinDenied', reason: 'busy' })
         peer.ws.close()
@@ -1346,13 +1421,18 @@ export class HostController extends EventEmitter {
     const before = new Set((await this.d.apollo.listClients()).map((c) => c.uuid))
 
     // Ждём, пока клиент запустит Moonlight. Если игрок отключился, не держим очередь все 15 с.
+    let onClose: (() => void) | undefined
+    let spawnTimer: NodeJS.Timeout | undefined
     const spawned = new Promise<boolean>((resolve) => {
       peer.pairSpawned = () => resolve(true)
-      peer.ws.once('close', () => resolve(false))
-      setTimeout(() => resolve(false), 15_000)
+      onClose = () => resolve(false)
+      peer.ws.once('close', onClose)
+      spawnTimer = setTimeout(() => resolve(false), 15_000)
     })
     this.send(peer, { t: 'pairBegin', pin })
     const ok = await spawned
+    clearTimeout(spawnTimer)
+    if (onClose) peer.ws.off('close', onClose)
 
     // PIN уходит первому ожидающему сопряжению. Это может оказаться чужая или старая попытка,
     // поэтому успехом считаем только появление нового клиента с нашим именем.
@@ -1455,6 +1535,20 @@ export class HostController extends EventEmitter {
     this.emitState()
   }
 
+  /**
+   * Переподключить геймпады игрока (двойной или зависший геймпад). Streamly 0.4+ сам быстро перезапускает
+   * трансляцию — Apollo создаёт виртуальные геймпады заново. У старых версий разрываем сессию в Apollo:
+   * клиент переподключится сам.
+   */
+  async resetGamepad(deviceId: string): Promise<void> {
+    const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
+    if (!peer) return
+    this.log(`reset gamepad: ${peer.nickname}`)
+    if (versionAtLeast(peer.appVersion, '0.4.0')) return this.send(peer, { t: 'resetGamepad' })
+    const uuid = this.friend(deviceId)?.apolloUuid
+    if (uuid) await this.d.apollo.disconnect(uuid).catch((e: unknown) => this.log('reset gamepad: disconnect failed', e))
+  }
+
   /** Ссылка-приглашение: одна на сеанс хостинга, действует 12 часов (или до остановки хоста). */
   createInvite(): { link: string; expiresAt: number } | null {
     const address = this.d.address()
@@ -1549,8 +1643,11 @@ export class HostController extends EventEmitter {
   async kick(deviceId: string): Promise<void> {
     // До следующего запуска хоста выгнанному нужно снова подтверждение, даже если он доверенный.
     this.kicked.add(deviceId)
+    // Ссылку-приглашение выгнанный тоже знает: она меняется, а с его адреса без подтверждения больше не пускаем.
+    this.invite = null
     for (const p of [...this.peers.values()]) {
       if (p.deviceId !== deviceId) continue
+      this.kicked.add(`a:${p.address}`)
       this.send(p, { t: 'kicked' })
       p.admitted = false
       p.ws.close()

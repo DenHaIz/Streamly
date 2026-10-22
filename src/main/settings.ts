@@ -104,7 +104,8 @@ export function normalizeSettings(s: Settings): Settings {
       muteHostChat: bool(st?.muteHostChat, d.stream.muteHostChat),
       autoQuality: bool(st?.autoQuality, d.stream.autoQuality),
       hdr: bool(st?.hdr, d.stream.hdr),
-      yuv444: bool(st?.yuv444, d.stream.yuv444)
+      yuv444: bool(st?.yuv444, d.stream.yuv444),
+      singleGamepad: bool(st?.singleGamepad, d.stream.singleGamepad)
     },
     host: {
       maxPlayers: clampInt(s.host?.maxPlayers, 1, 4, d.host.maxPlayers),
@@ -120,9 +121,15 @@ export function normalizeSettings(s: Settings): Settings {
       encoderCustom: normalizeEncoder(s.host?.encoderCustom),
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
       autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting),
-      inviteAutoAdmit: bool(s.host?.inviteAutoAdmit, d.host.inviteAutoAdmit)
+      inviteAutoAdmit: bool(s.host?.inviteAutoAdmit, d.host.inviteAutoAdmit),
+      requestSound: bool(s.host?.requestSound, d.host.requestSound)
     },
     hostQuality: normalizeHostQuality(hostQualityIn),
+    updates: {
+      auto: bool(s.updates?.auto, d.updates.auto),
+      skipped: typeof s.updates?.skipped === 'string' && /^[\w.+-]{0,32}$/.test(s.updates.skipped) ? s.updates.skipped : ''
+    },
+    showAdvanced: bool(s.showAdvanced, d.showAdvanced),
     recentHosts: Array.isArray(s.recentHosts)
       ? s.recentHosts
           .filter((h) => h && typeof h.address === 'string' && /^[\d.]+$/.test(h.address))

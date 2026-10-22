@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useAnimate } from 'framer-motion'
 import {
   Check,
   Copy,
@@ -12,6 +12,7 @@ import {
   LogIn,
   Mouse,
   Power,
+  RefreshCcw,
   RotateCw,
   Send,
   Server,
@@ -26,7 +27,8 @@ import {
   WifiOff,
   X
 } from 'lucide-react'
-import { useEffect, useState, type ReactNode, type Ref } from 'react'
+import { memo, useEffect, useState, type ReactNode, type Ref } from 'react'
+import { inviteMessage } from '@shared/invite'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
 import type { HostState, JoinRequestView, PlayerView } from '@shared/types'
@@ -190,17 +192,23 @@ function Credentials() {
   const [pass, setPass] = useState('')
   const [bad, setBad] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [attempt, setAttempt] = useState(0)
+  const [scope, animate] = useAnimate<HTMLInputElement>()
+  const shake = (): void => {
+    if (!scope.current) return
+    void animate(scope.current, { x: [0, -8, 8, -5, 5, 0] }, { duration: 0.4 })
+    scope.current.focus()
+    scope.current.select()
+  }
   const submit = async (): Promise<void> => {
     if (busy) return
     setBusy(true)
     try {
       const ok = await api().host.submitCredentials(user, pass)
       setBad(!ok)
-      if (!ok) setAttempt((n) => n + 1)
+      if (!ok) shake()
     } catch {
       setBad(true)
-      setAttempt((n) => n + 1)
+      shake()
     } finally {
       setBusy(false)
     }
@@ -221,8 +229,8 @@ function Credentials() {
       <p className="muted">{t('host.credentialsText')}</p>
       <div style={{ display: 'grid', gap: 12, textAlign: 'left', margin: '6px 0 18px' }}>
         <input className={`input ${bad ? 'invalid' : ''}`} placeholder={t('host.username')} aria-label={t('host.username')} autoComplete="username" value={user} onChange={(e) => setUser(e.target.value)} autoFocus />
-        <motion.input
-          key={attempt}
+        <input
+          ref={scope}
           className={`input ${bad ? 'invalid' : ''}`}
           type="password"
           placeholder={t('host.password')}
@@ -230,12 +238,10 @@ function Credentials() {
           autoComplete="current-password"
           value={pass}
           onChange={(e) => setPass(e.target.value)}
-          animate={bad ? { x: [0, -8, 8, -5, 5, 0] } : { x: 0 }}
-          transition={{ duration: 0.4 }}
         />
         <AnimatePresence>
           {bad && (
-            <motion.div className="pill pill-danger" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 26 }} exit={{ opacity: 0, height: 0 }}>
+            <motion.div className="pill pill-danger" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 26 }} exit={{ opacity: 0, height: 0 }} style={{ overflow: 'hidden' }}>
               {t('host.wrongCredentials')}
             </motion.div>
           )}
@@ -285,14 +291,14 @@ function SlotMeter({ used, max }: { used: number; max: number }) {
   return (
     <div className="slots">
       {Array.from({ length: max }, (_, i) => (
-        <motion.span key={i} className={`slot ${i < used ? 'on' : ''}`} layout initial={false} animate={{ scale: i < used ? 1 : 0.85 }} transition={spring} />
+        <motion.span key={i} className={`slot ${i < used ? 'on' : ''}`} initial={false} animate={{ scale: i < used ? 1 : 0.85 }} transition={spring} />
       ))}
     </div>
   )
 }
 
 function Dashboard({ host }: { host: HostState }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const go = useApp((s) => s.go)
   const [confirmStop, setConfirmStop] = useState(false)
   const [confirmKickAll, setConfirmKickAll] = useState(false)
@@ -302,7 +308,7 @@ function Dashboard({ host }: { host: HostState }) {
   // Готовый текст-приглашение: что сделать другу, чтобы подключиться.
   const invite = async (): Promise<void> => {
     const inv = await api().host.createInvite()
-    void api().copyText(t('host.inviteText', { name: host.hostName, address: host.address ?? '', link: inv?.link ?? '' }))
+    void api().copyText(inviteMessage(i18n.language === 'en' ? 'en' : 'ru', { name: host.hostName, address: host.address ?? '', link: inv?.link ?? '' }))
     toast({ tone: 'success', text: t('host.inviteCopied') }, 6000)
   }
   const stop = (): void => {
@@ -422,14 +428,23 @@ function Dashboard({ host }: { host: HostState }) {
       </AnimatePresence>
 
       <AnimatePresence>
+        {host.apolloDown && (
+          <motion.div key="apollo" className="card warn-card" style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+            <span style={{ flex: 1 }}>{t('host.apolloDown')}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {host.wrongGpu && (
-          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.div key="gpu" className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             <Cpu size={18} />
             <span style={{ flex: 1 }}>{t('host.wrongGpu', { gpu: host.wrongGpu.better, encoder: t(`host.encoders.${host.wrongGpu.encoderVendor}`) })}</span>
           </motion.div>
         )}
         {!host.wrongGpu && host.encoder?.vendor === 'software' && (
-          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+          <motion.div key="sw" className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             <Cpu size={18} />
             <span style={{ flex: 1 }}>{t('host.softwareEncoder')}</span>
           </motion.div>
@@ -468,7 +483,7 @@ function Dashboard({ host }: { host: HostState }) {
       <div className="section-title" style={{ marginTop: 22 }}>
         {t('host.players')}
       </div>
-      <motion.div className="players" layout>
+      <div className="players">
         <AnimatePresence initial={false} mode="popLayout">
           {host.players.length === 0 ? (
             <motion.div key="empty" className="card empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -482,7 +497,7 @@ function Dashboard({ host }: { host: HostState }) {
             host.players.map((p) => <PlayerCard key={p.deviceId} p={p} />)
           )}
         </AnimatePresence>
-      </motion.div>
+      </div>
 
       <Modal open={confirmStop} onClose={() => setConfirmStop(false)}>
         <h3 style={{ marginTop: 0 }}>{t('host.stopTitle')}</h3>
@@ -516,7 +531,10 @@ function Dashboard({ host }: { host: HostState }) {
   )
 }
 
-function RequestCard({ r }: { r: JoinRequestView }) {
+/** Карточки перерисовываются только при изменении своих данных (состояние хоста приходит каждые 2–5 с). */
+const sameJson = <T,>(a: T, b: T): boolean => JSON.stringify(a) === JSON.stringify(b)
+
+const RequestCard = memo(function RequestCard({ r }: { r: JoinRequestView }) {
   const { t } = useTranslation()
   const [busy, setBusy] = useState(false)
   const respond = (d: 'allow' | 'trust' | 'deny'): void => {
@@ -526,7 +544,7 @@ function RequestCard({ r }: { r: JoinRequestView }) {
   }
   return (
     <motion.div
-      layout
+      layout="position"
       className="card request"
       initial={{ opacity: 0, y: -12, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -549,18 +567,20 @@ function RequestCard({ r }: { r: JoinRequestView }) {
           {r.address}
         </div>
       </div>
-      <Button size="sm" variant="ghost" icon={<X size={15} />} disabled={busy} onClick={() => respond('deny')}>
-        {t('host.deny')}
-      </Button>
-      <Button size="sm" icon={<ShieldCheck size={15} />} disabled={busy} onClick={() => respond('trust')}>
-        {t('host.trust')}
-      </Button>
-      <Button size="sm" variant="success" icon={<Check size={15} />} disabled={busy} onClick={() => respond('allow')}>
-        {t('host.allow')}
-      </Button>
+      <div className="request-actions">
+        <Button size="sm" variant="ghost" icon={<X size={15} />} disabled={busy} onClick={() => respond('deny')} title={t('host.deny')} aria-label={t('host.deny')}>
+          <span className="collapsible">{t('host.deny')}</span>
+        </Button>
+        <Button size="sm" icon={<ShieldCheck size={15} />} disabled={busy} onClick={() => respond('trust')} title={t('host.trust')} aria-label={t('host.trust')}>
+          <span className="collapsible">{t('host.trust')}</span>
+        </Button>
+        <Button size="sm" variant="success" icon={<Check size={15} />} disabled={busy} onClick={() => respond('allow')}>
+          {t('host.allow')}
+        </Button>
+      </div>
     </motion.div>
   )
-}
+}, (a, b) => sameJson(a.r, b.r))
 
 function PermToggle({ on, selfOff, icon, label, onClick }: { on: boolean; selfOff?: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   const { t } = useTranslation()
@@ -582,14 +602,18 @@ function PermToggle({ on, selfOff, icon, label, onClick }: { on: boolean; selfOf
   )
 }
 
-function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
+const PlayerCard = memo(function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
   const { t } = useTranslation()
+  const resetGamepad = (): void => {
+    void api().host.resetGamepad(p.deviceId)
+    useApp.getState().toast({ tone: 'info', text: t('host.resetGamepadDone', { name: p.nickname }) })
+  }
   const toggle = (key: keyof InputPerms): void => void api().host.setPerms(p.deviceId, { [key]: !p.perms[key] })
   const tone = p.status === 'streaming' ? 'pill-success' : p.status === 'pairing' || p.status === 'connecting' ? 'pill-accent' : ''
   return (
     <motion.div
       ref={ref}
-      layout
+      layout="position"
       className="card player"
       initial={{ opacity: 0, scale: 0.9, y: 16 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -626,13 +650,18 @@ function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
             </AnimatePresence>
           </div>
         </div>
+        {p.status === 'streaming' && p.perms.gamepad && (
+          <motion.button className="btn btn-ghost icon-btn" onClick={resetGamepad} title={t('host.resetGamepad')} aria-label={t('host.resetGamepad')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
+            <RefreshCcw size={16} />
+          </motion.button>
+        )}
         <motion.button className="btn btn-ghost icon-btn kick" onClick={() => void api().host.kick(p.deviceId)} title={t('host.kick')} aria-label={t('host.kick')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
           <UserMinus size={17} />
         </motion.button>
       </div>
       <AnimatePresence initial={false}>
         {p.inputRequest && (
-          <motion.div className="input-request" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={softSpring}>
+          <motion.div className="input-request" style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={softSpring}>
             <Hand size={15} />
             <span style={{ flex: 1 }}>
               {t('host.asksFor', {
@@ -658,7 +687,7 @@ function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
       </div>
     </motion.div>
   )
-}
+}, (a, b) => a.ref === b.ref && sameJson(a.p, b.p))
 
 /**
  * Звук хоста: Discord убран из трансляции, или игроки просят убрать, но это невозможно (и почему).

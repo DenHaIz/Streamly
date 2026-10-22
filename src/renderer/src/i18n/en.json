@@ -103,7 +103,6 @@
     "kickAll": "Disconnect all",
     "invite": "Invite",
     "inviteCopied": "Invite with a link copied. Send it to your friends: they just copy the message and open Streamly.",
-    "inviteText": "Join me in Streamly!\n{{link}}\nCopy this message and open Streamly — it will offer to connect (the link works for 12 hours).\nNo link? Radmin VPN: our shared network → Streamly → Connect → \"{{name}}\" or address {{address}}.\nNo Streamly: https://github.com/DenHaIz/Streamly/releases/latest",
     "selfCheck": "Check",
     "upload": "Upload: up to {{mbps}} Mbps",
     "uploadHint": "Each player gets their own stream. Make sure your internet upload speed is higher than this.",
@@ -148,7 +147,10 @@
     "softwareEncoder": "Video is encoded on the CPU: several players will stutter. Update the graphics driver and restart \"I'm the host\".",
     "wrongGpu": "{{encoder}} encodes the video, but this PC has {{gpu}}. The monitor is probably plugged into the motherboard: plug it into the graphics card and restart \"I'm the host\".",
     "asksFor": "Asks for: {{what}}",
-    "give": "Give"
+    "give": "Give",
+    "resetGamepad": "Reconnect gamepad",
+    "resetGamepadDone": "Reconnecting {{name}}'s gamepad",
+    "apolloDown": "Apollo stopped responding — restarting it. Players will reconnect on their own in a few seconds."
   },
   "connect": {
     "title": "Connect",
@@ -404,7 +406,22 @@
       "swPresetHint": "Only if the graphics card can't encode. Even a strong CPU handles one or two players",
       "swThreads": "CPU threads",
       "swThreadsHint": "Minimum threads for encoding. For an 8-core Ryzen — 4–8"
-    }
+    },
+    "showAdvanced": "Advanced",
+    "showAdvancedHint": "Show rarely needed settings: encoding, bitrate, resolution, mouse modes and more",
+    "advancedStream": "Advanced stream settings",
+    "advancedHost": "Advanced host settings",
+    "diagnostics": "Diagnostics",
+    "diagnosticsHint": "A report for troubleshooting: versions, network, state and the latest log lines",
+    "diagnosticsCopied": "Report copied — paste it into your problem report",
+    "copyDiagnostics": "Copy report",
+    "openLogs": "Logs folder",
+    "fullscreenWarn": "Exclusive fullscreen may flicker when the Alt+F2 menu opens and gets in the way of a second monitor. Borderless is better.",
+    "framePacingHint": "Smoother frames at the cost of a little latency",
+    "singleGamepad": "All gamepads as one",
+    "singleGamepadHint": "Turn on if the game sees two gamepads instead of one (Steam Input, DS4Windows)",
+    "requestSound": "Sound on requests",
+    "requestSoundHint": "A short chime when someone wants to join or asks for control; the tray icon blinks"
   },
   "errorHints": {
     "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
@@ -533,7 +550,11 @@
     "perHost": "Own quality for this host",
     "reconnecting": "Connection dropped — reconnecting…",
     "poorNetworkAuto": "The connection is losing packets. If it continues, quality will drop automatically.",
-    "autoLowered": "Auto quality lowered the quality because of a poor connection."
+    "autoLowered": "Auto quality lowered the quality because of a poor connection.",
+    "gamepadTitle": "Gamepad doubled or stuck?",
+    "gamepadHint": "Reconnecting restarts the stream for a couple of seconds",
+    "gamepadOff": "The host turned your gamepad off",
+    "gamepadReset": "Reconnect"
   },
   "overlay": {
     "title": "Stream menu",
@@ -541,7 +562,7 @@
     "otherScreenHint": "The cursor moves to your other monitor. Click the stream window to come back.",
     "back": "Back to the game",
     "leaveConfirm": "Really disconnect?",
-    "tip": "Esc or Alt+F2 — back to the game"
+    "tip": "Esc, Alt+F2 or Ctrl+Shift+F2 — back to the game. Mouse stuck in the stream window — Ctrl+Alt+Shift+Z"
   },
   "invite": {
     "title": "Invite from {{name}}",
@@ -565,5 +586,36 @@
     "relayTip": "Radmin seems to route you through its relay: higher latency, lower speed. Open Radmin VPN and check the connection type to the host; restarting Radmin on both PCs often helps.",
     "wifiTip": "You're on Wi-Fi: a cable usually removes stutters and latency spikes.",
     "softwareTip": "The host encodes on the CPU — several players will stutter."
+  },
+  "update": {
+    "title": "Updates",
+    "auto": "Check for updates",
+    "autoHint": "At startup and every few hours. Downloading and installing only happen when you click",
+    "check": "Check",
+    "checking": "Checking for updates…",
+    "latest": "You have the latest version",
+    "notChecked": "Not checked yet",
+    "unsupported": "Updates work only in the installed version",
+    "checkedAt": "Checked {{date}}",
+    "availableTitle": "Version {{version}} is available",
+    "readyTitle": "Version {{version}} is downloaded",
+    "optional": "The update is optional — install it whenever it suits you",
+    "whatsNew": "What's new",
+    "download": "Download",
+    "downloading": "Downloading update",
+    "downloadingPct": "Downloading: {{pct}}%",
+    "speed": "{{mb}} MB/s",
+    "install": "Restart and update",
+    "onQuit": "Or it installs itself when you quit Streamly",
+    "busyWarn": "Your game or hosting will stop while it installs (about a minute)",
+    "later": "Later",
+    "skip": "Skip this version",
+    "errors": {
+      "network": "Cannot reach GitHub — check your internet",
+      "noRelease": "This release has no update files — download the installer from GitHub",
+      "checksum": "The download was corrupted — try again",
+      "disk": "Not enough disk space",
+      "other": "Update failed — try again later"
+    }
   }
 }

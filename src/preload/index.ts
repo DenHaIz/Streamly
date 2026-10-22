@@ -20,6 +20,13 @@ const bridge: StreamlyBridge = {
   openLogs: () => invoke(IPC.openLogs),
   copyDiagnostics: () => invoke(IPC.copyDiagnostics),
   checkInvite: () => invoke(IPC.checkInvite),
+  update: {
+    getState: () => invoke(IPC.updateGetState),
+    check: () => invoke(IPC.updateCheck),
+    download: () => invoke(IPC.updateDownload),
+    install: () => invoke(IPC.updateInstall),
+    skip: (version) => invoke(IPC.updateSkip, version)
+  },
   host: {
     getState: () => invoke(IPC.hostGetState),
     start: () => invoke(IPC.hostStart),
@@ -37,7 +44,8 @@ const bridge: StreamlyBridge = {
     listDisplays: () => invoke(IPC.hostListDisplays),
     createInvite: () => invoke(IPC.hostCreateInvite),
     respondInput: (id, grant) => invoke(IPC.hostRespondInput, id, grant),
-    setInputPaused: (paused) => invoke(IPC.hostSetInputPaused, paused)
+    setInputPaused: (paused) => invoke(IPC.hostSetInputPaused, paused),
+    resetGamepad: (id) => invoke(IPC.hostResetGamepad, id)
   },
   client: {
     getState: () => invoke(IPC.clientGetState),
@@ -49,7 +57,8 @@ const bridge: StreamlyBridge = {
     reset: () => invoke(IPC.clientReset),
     setSelfOff: (patch) => invoke(IPC.clientSetSelfOff, patch),
     restartStream: () => invoke(IPC.clientRestartStream),
-    requestInput: (perms) => invoke(IPC.clientRequestInput, perms)
+    requestInput: (perms) => invoke(IPC.clientRequestInput, perms),
+    resetGamepad: () => invoke(IPC.clientResetGamepad)
   },
   overlay: {
     close: () => invoke(IPC.overlayClose),

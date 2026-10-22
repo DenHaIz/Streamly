@@ -59,7 +59,7 @@ export function Switch({ checked, onChange, disabled, label }: { checked: boolea
       className={`switch ${checked ? 'on' : ''}`}
       onClick={() => onChange(!checked)}
     >
-      <motion.span className="switch-knob" layout transition={spring} />
+      <motion.span className="switch-knob" initial={false} animate={{ x: checked ? 18 : 0 }} transition={spring} />
     </button>
   )
 }
@@ -103,17 +103,39 @@ export function Slider({
 export function Segmented<T extends string>({
   value,
   options,
-  onChange
+  onChange,
+  disabled
 }: {
   value: T
   options: { value: T; label: ReactNode }[]
   onChange: (v: T) => void
+  disabled?: boolean
 }) {
   const id = useId()
   return (
-    <div className="segmented" role="radiogroup">
+    <div className={`segmented ${disabled ? 'disabled' : ''}`} role="radiogroup" aria-disabled={disabled || undefined}>
       {options.map((o) => (
-        <button key={o.value} type="button" role="radio" aria-checked={o.value === value} className={o.value === value ? 'active' : ''} onClick={() => onChange(o.value)}>
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={o.value === value}
+          tabIndex={o.value === value ? 0 : -1}
+          disabled={disabled}
+          className={o.value === value ? 'active' : ''}
+          onClick={() => onChange(o.value)}
+          onKeyDown={(e) => {
+            // Стрелки — как у обычной группы переключателей.
+            const dir = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+            if (!dir) return
+            e.preventDefault()
+            const i = options.findIndex((x) => x.value === value)
+            const next = options[(i + dir + options.length) % options.length]
+            onChange(next.value)
+            const btns = (e.currentTarget.parentElement?.querySelectorAll('button') ?? []) as NodeListOf<HTMLButtonElement>
+            btns[(i + dir + options.length) % options.length]?.focus()
+          }}
+        >
           {o.value === value && <motion.span layoutId={`seg-${id}`} className="seg-pill" transition={spring} />}
           {o.label}
         </button>
@@ -149,6 +171,36 @@ export function Select<T extends string | number>({
       ))}
     </select>
   )
+}
+
+/**
+ * Плавно раскрывающийся блок: высота анимируется с обрезкой содержимого, чтобы соседние строки
+ * не наезжали друг на друга. Свёрнутый блок не попадает в порядок Tab.
+ */
+export function Collapse({ open, children, className }: { open: boolean; children: ReactNode; className?: string }) {
+  return (
+    <AnimatePresence initial={false}>
+      {open && (
+        <motion.div
+          className={`collapse ${className ?? ''}`}
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={{ height: { type: 'spring', stiffness: 320, damping: 34 }, opacity: { duration: 0.18 } }}
+          style={{ overflow: 'hidden' }}
+        >
+          {children}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+/** Последнее непустое значение: модальное окно показывает содержимое и во время анимации закрытия. */
+export function useLastNonNull<T>(value: T | null | undefined): T | null | undefined {
+  const ref = useRef(value)
+  if (value) ref.current = value
+  return value ?? ref.current
 }
 
 export function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {

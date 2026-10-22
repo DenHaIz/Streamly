@@ -70,6 +70,11 @@ const bridge: StreamlyBridge = {
     resetGamepad: () => invoke(IPC.clientResetGamepad),
     identifyPad: () => invoke(IPC.clientIdentifyPad)
   },
+  pads: {
+    list: () => invoke(IPC.padsList),
+    state: (guid) => invoke(IPC.padsState, guid),
+    close: () => invoke(IPC.padsClose)
+  },
   overlay: {
     close: () => invoke(IPC.overlayClose),
     toOtherScreen: () => invoke(IPC.overlayOtherScreen),

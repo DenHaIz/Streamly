@@ -23,7 +23,7 @@ Streamly сам ставит и настраивает Apollo, сопрягае�
 
 ## Скачать
 
-**[Streamly-Setup-0.5.2.exe](https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.5.2.exe)** — Windows 10/11 x64, [все релизы](https://github.com/DenHaIz/Streamly/releases).
+**[Streamly-Setup-0.6.0.exe](https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.6.0.exe)** — Windows 10/11 x64, [все релизы](https://github.com/DenHaIz/Streamly/releases).
 
 > **Друзьям:** короткая инструкция по установке и подключению — [INSTALL.md](INSTALL.md).
 > **Разработчикам:** состояние проекта, схема подключения и как выпускать версии — [HANDOFF.md](HANDOFF.md).

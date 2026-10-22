@@ -24,7 +24,8 @@ import { join } from 'node:path'
 import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision, type NavTarget } from '@shared/ipc'
 import { inviteMessage } from '@shared/invite'
 import type { InputPerms } from '@shared/perms'
-import type { ClientState, DeepPartial, HostDisplay, HostState, HotkeyName, HotkeyStatus, Invite, RadminStatus, Settings } from '@shared/types'
+import type { ClientState, DeepPartial, HostDisplay, HostState, HotkeyName, HotkeyStatus, Invite, PadDeviceView, RadminStatus, Settings } from '@shared/types'
+import { comboOf } from '@shared/hotkeys'
 import { parseInviteLink } from '@shared/protocol'
 import { SecretsService, SettingsService } from './settings'
 import { JsonFile, type Cipher } from './store'
@@ -435,11 +436,83 @@ void app.whenReady().then(() => {
       })
       .catch((e: unknown) => log('[helper] volume failed', e instanceof Error ? e.message : e))
   }
+  // ---------- Геймпады глазами Moonlight (его SDL3 и база раскладок) ----------
+  const sdlPath = join(vendorDir, 'moonlight', 'SDL3.dll')
+  const padDb = join(vendorDir, 'moonlight', 'gamecontrollerdb.txt')
+  const listPads = async (): Promise<PadDeviceView[] | null> => {
+    if (!helper.available || !existsSync(sdlPath)) return null
+    const maps = settings.get().stream.padMappings
+    const list = await helper.pads(sdlPath, padDb, Object.values(maps))
+    return list.map((p) => ({ guid: p.guid, name: p.name, gamepad: p.gamepad, custom: !!maps[p.guid] }))
+  }
+  /** Про геймпад без раскладки говорим один раз за запуск Streamly: Moonlight его не передаёт хосту. */
+  const padsWarned = new Set<string>()
+  const checkPads = async (): Promise<void> => {
+    const list = await listPads().catch(() => null)
+    const missing = (list ?? []).filter((p) => !p.gamepad && !padsWarned.has(p.guid))
+    if (!missing.length) return
+    missing.forEach((p) => padsWarned.add(p.guid))
+    const names = missing.map((p) => p.name || '?')
+    log(`[pads] Moonlight does not know these gamepads: ${names.join(', ')}`)
+    broadcast('padsWarning', { names })
+    const ru = settings.get().language === 'ru'
+    notify(
+      ru
+        ? `Moonlight не видит геймпад «${names[0]}». Настройте его кнопки: Настройки → Трансляция → Геймпады.`
+        : `Moonlight doesn't see the gamepad "${names[0]}". Set up its buttons: Settings → Stream → Gamepads.`,
+      () => navigate('settings')
+    )
+  }
+
   client.on('streamProcess', () => {
     applyVolume()
+    // Список геймпадов Moonlight собирает при запуске: проверяем, не остался ли какой-то без раскладки.
+    setTimeout(() => void checkPads(), 4000)
     // Меню создаём заранее, чтобы по Alt+F2 оно открывалось сразу.
     overlay ??= createOverlay()
   })
+
+  // ---------- Окна поверх игры ----------
+  /**
+   * Окно поверх игры: «поверх всех» заново (игра в окне «без рамки» тоже бывает поверх всех и поднимает себя)
+   * и, если нужно, активным. Electron сам часто не может забрать фокус у игры (Windows отдаёт его только процессу,
+   * от которого пришёл последний ввод): это делает помощник.
+   */
+  const raise = (w: BrowserWindow, activate: boolean): void => {
+    if (w.isDestroyed()) return
+    w.setAlwaysOnTop(true, 'screen-saver')
+    w.moveTop()
+    if (activate) w.focus()
+    if (!helper.available) return
+    const hwnd = Number(w.getNativeWindowHandle().readBigUInt64LE(0))
+    void helper
+      .raise(hwnd, activate)
+      .then((ok) => {
+        if (w.isDestroyed() || !activate) return
+        w.focus()
+        w.webContents.focus()
+        if (!ok) log('[overlay] Windows did not let the window come to the front')
+      })
+      .catch(() => undefined)
+  }
+  /**
+   * Окно поверх игры закрывается, когда фокус ушёл (Alt+Tab, клик в другое окно). В первую секунду игра может
+   * забрать фокус обратно сама — тогда один раз поднимаем окно снова, а не закрываем его сразу после открытия.
+   */
+  const closeOnBlur = (w: BrowserWindow, close: () => void): void => {
+    const shownAt = Date.now()
+    let retried = false
+    w.removeAllListeners('blur')
+    w.on('blur', () => {
+      if (!retried && Date.now() - shownAt < 1000) {
+        retried = true
+        raise(w, true)
+        return
+      }
+      w.removeAllListeners('blur')
+      close()
+    })
+  }
 
   // ---------- Меню во время игры (Alt+F2) ----------
   const overlayPayload = (open: boolean): BridgeEvents['overlay'] => ({ open, screens: screen.getAllDisplays().length })
@@ -457,10 +530,10 @@ void app.whenReady().then(() => {
     const o = overlay
     o.setBounds(bounds)
     o.show()
-    o.focus()
+    raise(o, true)
     o.webContents.send(EVENT_CHANNEL, 'overlay', overlayPayload(true))
     // Ушли в другое окно (Alt+Tab, клик на другом мониторе): меню закрывается само.
-    o.once('blur', () => hideOverlay(false))
+    closeOnBlur(o, () => hideOverlay(false))
   }
   const hideOverlay = (backToGame: boolean): void => {
     const o = overlay
@@ -492,10 +565,9 @@ void app.whenReady().then(() => {
     const open = (): void => {
       hostMenuLoading = false
       m.show()
-      m.focus()
+      raise(m, true)
       m.webContents.send(EVENT_CHANNEL, 'hostMenu', { open: true })
-      m.removeAllListeners('blur')
-      m.once('blur', () => hideHostMenu())
+      closeOnBlur(m, () => hideHostMenu())
       syncHostNotify()
     }
     if (m.webContents.isLoading()) {
@@ -531,6 +603,8 @@ void app.whenReady().then(() => {
     const want = settings.get().host.gameNotify && hs.phase === 'running' && pending && !appVisible && !hostMenu?.isVisible()
     if (!want) {
       if (hostNotifyWin && !hostNotifyWin.isDestroyed() && hostNotifyWin.isVisible()) hostNotifyWin.hide()
+      if (notifyKeepTop) clearInterval(notifyKeepTop)
+      notifyKeepTop = null
       return
     }
     if (!hostNotifyWin || hostNotifyWin.isDestroyed()) {
@@ -544,8 +618,21 @@ void app.whenReady().then(() => {
     if (!hostNotifyWin.isVisible()) {
       placeNotify(hostNotifyWin)
       hostNotifyWin.showInactive()
+      const w = hostNotifyWin
+      raise(w, false)
+      // Игра может снова встать «поверх всех»: пока плашка видна, поднимаем её (без фокуса).
+      if (notifyKeepTop) clearInterval(notifyKeepTop)
+      notifyKeepTop = setInterval(() => {
+        if (w.isDestroyed() || !w.isVisible()) {
+          if (notifyKeepTop) clearInterval(notifyKeepTop)
+          notifyKeepTop = null
+          return
+        }
+        raise(w, false)
+      }, 2000)
     }
   }
+  let notifyKeepTop: NodeJS.Timeout | null = null
   host.on('state', syncHostNotify)
 
   // ---------- Горячие клавиши (настраиваются в «Настройки → Общие») ----------
@@ -595,8 +682,42 @@ void app.whenReady().then(() => {
     }
   }
   let hotkeysSuspended = false
-  const syncHotkeys = (reprobe = false): void => {
+  /**
+   * Горячие клавиши ловит помощник (перехват клавиатуры). Системные (RegisterHotKey, globalShortcut Electron) не видят
+   * сочетаний, пока Moonlight захватил клавиатуру (он съедает Alt и Ctrl и отправляет сочетание хосту), и у хоста
+   * срабатывали бы от клавиш игроков, которые вводит Apollo. Без помощника — системные.
+   */
+  const viaHelper = helper.available
+  let helperHotkeySig = ''
+  const syncHelperHotkeys = (): void => {
+    const keys = settings.get().hotkeys
+    const combos: string[] = []
+    for (const b of bindings) {
+      const acc = keys[b.name]
+      const combo = acc ? comboOf(acc) : null
+      const active = !hotkeysSuspended && !!combo && b.active()
+      hotkeyStatus[b.name] = !acc ? 'off' : active ? 'ok' : 'idle'
+      if (active) combos.push(`${b.name}:${combo}`)
+    }
+    const sig = combos.join(',')
+    if (sig !== helperHotkeySig) {
+      helperHotkeySig = sig
+      void helper.setHotkeys(combos).catch((e: unknown) => log('[hotkeys] helper', e instanceof Error ? e.message : e))
+    }
+    const st = JSON.stringify(hotkeyStatus)
+    if (st !== hotkeySig) {
+      hotkeySig = st
+      broadcast('hotkeys', { ...hotkeyStatus })
+    }
+  }
+  helper.on('hotkey', (id: string) => {
     if (quitting || hotkeysSuspended) return
+    bindings.find((b) => b.name === id && b.active())?.run()
+  })
+  const syncHotkeys = (reprobe = false): void => {
+    if (quitting) return
+    if (viaHelper) return syncHelperHotkeys()
+    if (hotkeysSuspended) return
     const keys = settings.get().hotkeys
     for (const b of bindings) {
       const acc = keys[b.name]
@@ -873,6 +994,7 @@ void app.whenReady().then(() => {
       hotkeysSuspended = true
       for (const acc of registered.values()) globalShortcut.unregister(acc)
       registered.clear()
+      if (viaHelper) syncHotkeys()
     } else {
       hotkeysSuspended = false
       syncHotkeys(true)
@@ -929,6 +1051,13 @@ void app.whenReady().then(() => {
     if (hostNotifyWin && !hostNotifyWin.isDestroyed()) placeNotify(hostNotifyWin)
   })
   handle(IPC.clientIdentifyPad, () => client.identifyPad())
+  handle(IPC.padsList, () => listPads())
+  handle(IPC.padsState, (guid: string) =>
+    helper.available && existsSync(sdlPath) && /^[0-9a-f]{32}$/.test(String(guid)) ? helper.padState(sdlPath, padDb, String(guid)) : null
+  )
+  handle(IPC.padsClose, async () => {
+    if (helper.available) await helper.padClose().catch(() => undefined)
+  })
   handle(IPC.checkInvite, async () => {
     if (pendingInvite) {
       const inv = pendingInvite

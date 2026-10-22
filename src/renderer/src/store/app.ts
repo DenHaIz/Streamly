@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, HotkeyName, HotkeyStatus, Invite, RadminStatus, Settings, UpdateState } from '@shared/types'
 import { api } from '@/lib/bridge'
-import { setLanguage } from '@/i18n'
+import i18n, { setLanguage } from '@/i18n'
 import { playChime } from '@/lib/sound'
 
 export type SettingsTab = 'general' | 'stream' | 'host' | 'about'
@@ -111,6 +111,25 @@ export const useApp = create<AppStore>((set, get) => ({
     b.on('update', (u) => set({ update: u }))
     // Звук — только в главном окне (окна поверх игры получают те же события).
     if (!location.hash) b.on('alert', ({ kind }) => playChime(kind))
+    // Геймпад, которого Moonlight не видит: подсказка с переходом к мастеру раскладки.
+    if (!location.hash) {
+      b.on('padsWarning', ({ names }) =>
+        get().toast(
+          {
+            tone: 'warning',
+            text: i18n.t('pads.warning', { name: names[0] ?? '' }),
+            action: {
+              label: i18n.t('pads.setup'),
+              run: () => {
+                set({ settingsTab: 'stream' })
+                get().go('settings')
+              }
+            }
+          },
+          15000
+        )
+      )
+    }
     // Пункты меню в трее открывают нужный экран.
     b.on('navigate', (to) => {
       if (!get().settings?.onboarded) return

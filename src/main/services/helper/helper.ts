@@ -2,6 +2,16 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+import type { PadRawState } from '@shared/types'
+
+/** Устройство ввода глазами Moonlight (SDL). gamepad — у SDL есть раскладка, и Moonlight передаст его хосту. */
+export interface PadDevice {
+  guid: string
+  name: string
+  vendor: number
+  product: number
+  gamepad: boolean
+}
 
 /** Состояние маршрутизации звука хоста по данным помощника. */
 export interface RouterState {
@@ -80,6 +90,9 @@ export class Helper extends EventEmitter {
   private crashes = 0
   private routerOptions: RouterOptions | null = null
   routerState: RouterState | null = null
+  /** Сочетания, которые помощник сейчас ловит («id:vk:mods»): после перезапуска помощника отправляются снова. */
+  private hotkeyCombos: string[] = []
+  private hotkeyRetry: NodeJS.Timeout | null = null
 
   constructor(
     private readonly exePath: string,
@@ -115,6 +128,8 @@ export class Helper extends EventEmitter {
       // Маршрутизация звука должна пережить падение помощника, но без бесконечного цикла перезапусков.
       const delay = Math.min(5500 * 2 ** Math.max(0, this.crashes - 1), 60_000)
       if (this.routerOptions?.enabled) setTimeout(() => void this.router(this.routerOptions!).catch(() => undefined), delay)
+      // Горячие клавиши тоже должны пережить падение помощника.
+      if (this.hotkeyCombos.length) this.retryHotkeys(delay)
     })
     proc.on('error', (e) => this.log('[helper] spawn failed', e))
     return proc
@@ -128,6 +143,10 @@ export class Helper extends EventEmitter {
       return
     }
     if (msg.event === 'log') return this.log(`[helper] ${String(msg.text)}`)
+    if (msg.event === 'hotkey') {
+      this.emit('hotkey', String(msg.id))
+      return
+    }
     if (msg.event === 'router') {
       this.routerState = msg.state as RouterState
       this.emit('router', this.routerState)
@@ -217,8 +236,55 @@ export class Helper extends EventEmitter {
     return state
   }
 
+  /**
+   * Горячие клавиши через перехват клавиатуры помощника («id:vk:mods», см. comboOf). Работают и когда Moonlight
+   * захватил клавиатуру, а клавиши, которые Apollo вводит у хоста от игроков, не считаются. Пустой список — снять.
+   */
+  async setHotkeys(combos: string[]): Promise<void> {
+    this.hotkeyCombos = combos
+    if (this.hotkeyRetry) clearTimeout(this.hotkeyRetry)
+    this.hotkeyRetry = null
+    if (!combos.length && !this.proc) return
+    try {
+      await this.call('hotkeys', { combos })
+    } catch (e) {
+      if (combos.length) this.retryHotkeys(5500)
+      throw e
+    }
+  }
+
+  private retryHotkeys(delay: number): void {
+    if (this.hotkeyRetry) clearTimeout(this.hotkeyRetry)
+    this.hotkeyRetry = setTimeout(() => {
+      this.hotkeyRetry = null
+      if (this.hotkeyCombos.length) void this.setHotkeys(this.hotkeyCombos).catch(() => undefined)
+    }, delay)
+  }
+
+  /** Окно поверх всех (и поверх игры «без рамки»); activate — ещё и сделать активным, обходя запрет Windows. */
+  raise(hwnd: number, activate: boolean): Promise<boolean> {
+    return this.call<boolean>('raise', { hwnd, activate }, 2000)
+  }
+
+  /** Геймпады этого ПК так, как их видит Moonlight (его SDL3 и база раскладок, плюс свои раскладки Streamly). */
+  pads(sdl: string, db: string, mappings: string[]): Promise<PadDevice[]> {
+    return this.call<PadDevice[]>('pads', { sdl, db, mappings }, 8000)
+  }
+
+  /** Сырые кнопки, оси и крестовины геймпада (для мастера раскладки). null — геймпад отключён. */
+  padState(sdl: string, db: string, guid: string): Promise<PadRawState | null> {
+    return this.call<PadRawState | null>('padState', { sdl, db, guid }, 3000)
+  }
+
+  padClose(): Promise<boolean> {
+    return this.call<boolean>('padClose', {}, 3000)
+  }
+
   /** Закрывает помощника: он возвращает маршрутизацию звука и выходит сам. */
   stop(): void {
+    this.hotkeyCombos = []
+    if (this.hotkeyRetry) clearTimeout(this.hotkeyRetry)
+    this.hotkeyRetry = null
     this.routerOptions = null
     this.proc?.stdin?.end()
   }

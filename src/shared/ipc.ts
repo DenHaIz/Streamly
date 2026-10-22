@@ -14,7 +14,9 @@ import type {
   TrustedFriendView,
   UpdateState,
   HotkeyName,
-  HotkeyStatus
+  HotkeyStatus,
+  PadDeviceView,
+  PadRawState
 } from './types'
 
 /** spectate — пустить зрителем: без клавиатуры, мыши и геймпада. */
@@ -39,6 +41,8 @@ export interface BridgeEvents {
   hotkeys: Record<HotkeyName, HotkeyStatus>
   /** Меню хоста поверх игры открыто или закрыто (только в его окне). */
   hostMenu: { open: boolean }
+  /** В начале игры: геймпады, которых Moonlight не видит (нет раскладки) — их можно настроить. */
+  padsWarning: { names: string[] }
 }
 
 export type NavTarget = 'home' | 'host' | 'connect' | 'settings' | 'about'
@@ -143,6 +147,15 @@ export interface StreamlyBridge {
     identifyPad(): Promise<void>
   }
 
+  /** Геймпады этого ПК глазами Moonlight и мастер раскладки. */
+  pads: {
+    /** null — модуль Streamly (помощник) недоступен. */
+    list(): Promise<PadDeviceView[] | null>
+    state(guid: string): Promise<PadRawState | null>
+    /** Мастер закрыт: отпустить устройство. */
+    close(): Promise<void>
+  }
+
   /** Меню во время игры (Alt+F2). */
   overlay: {
     /** Закрыть меню и вернуться в игру. */
@@ -212,6 +225,9 @@ export const IPC = {
   clientSetSelfOff: 'client:setSelfOff',
   clientRestartStream: 'client:restartStream',
   clientRequestInput: 'client:requestInput',
+  padsList: 'pads:list',
+  padsState: 'pads:state',
+  padsClose: 'pads:close',
   overlayToggleStats: 'overlay:toggleStats',
   overlayClose: 'overlay:close',
   overlayOtherScreen: 'overlay:otherScreen'

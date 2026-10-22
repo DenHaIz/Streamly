@@ -361,6 +361,27 @@ const bridge: StreamlyBridge = {
       setClient({ padIdentify: 'done', pads: (client.pads ?? []).map((p) => (p.you ? { ...p, slot: 3 } : p)) })
     }
   },
+  pads: {
+    async list() {
+      await wait(300)
+      const maps = settings.stream.padMappings
+      return [
+        { guid: '030000005e0400008e02000000007200', name: 'Xbox 360 Controller', gamepad: true, custom: false },
+        { guid: '03000000790000000600000000000000', name: 'USB Gamepad  (старый)', gamepad: !!maps['03000000790000000600000000000000'], custom: !!maps['03000000790000000600000000000000'] }
+      ]
+    },
+    async state() {
+      // Имитация: каждые две секунды «нажимается» следующая кнопка.
+      const n = Math.floor(Date.now() / 2000) % 12
+      const pressed = Math.floor(Date.now() / 1000) % 2 === 0
+      return {
+        buttons: Array.from({ length: 12 }, (_, i) => pressed && i === n),
+        axes: [0, 0, 0, 0, 0, 0].map((v, i) => (pressed && n >= 8 && i === n - 8 ? 30000 : v)),
+        hats: [0]
+      }
+    },
+    async close() {}
+  },
   overlay: {
     async close() {
       emit('overlay', { open: false, screens: 2 })

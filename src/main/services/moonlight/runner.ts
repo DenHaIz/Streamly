@@ -64,6 +64,21 @@ export function streamParams(
   return { size, fps, bitrateKbps: pickBitrate(s, size, fps, policy) }
 }
 
+/**
+ * Свои раскладки геймпадов для SDL внутри Moonlight (переменная SDL_GAMECONTROLLERCONFIG, по строке на геймпад).
+ * Каждая раскладка ещё и с обнулённой контрольной суммой имени в GUID: SDL сравнивает GUID и без неё,
+ * если имя устройства у Moonlight прочиталось иначе.
+ */
+export function padMappingsEnv(mappings: Record<string, string> | undefined): string | undefined {
+  const lines: string[] = []
+  for (const [guid, m] of Object.entries(mappings ?? {})) {
+    lines.push(m)
+    const noCrc = `${guid.slice(0, 4)}0000${guid.slice(8)}`
+    if (noCrc !== guid) lines.push(noCrc + m.slice(guid.length))
+  }
+  return lines.length ? lines.join('\n') : undefined
+}
+
 /** Аргументы `Moonlight.exe stream` с учётом условий хоста (звук, потолок битрейта, монитор хоста). */
 export function buildStreamArgs(host: string, s: StreamSettings, native?: { width: number; height: number }, policy?: StreamPolicy): string[] {
   const args = ['stream', host, APOLLO_APP]
@@ -130,13 +145,13 @@ export class MoonlightRunner {
     if (!existsSync(marker)) writeFileSync(marker, '')
   }
 
-  private spawn(args: string[]): MoonlightProcess {
+  private spawn(args: string[], env?: Record<string, string>): MoonlightProcess {
     this.ensureDataDir()
     const run: RunLog = { command: args.slice(0, 2).join(' '), startedAt: Date.now(), lines: [] }
     const subscribers: Array<(line: string) => void> = []
     this.runs.push(run)
     if (this.runs.length > 6) this.runs.shift()
-    const child = spawn(this.exePath, args, { cwd: this.dataDir, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(this.exePath, args, { cwd: this.dataDir, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'], env: env ? { ...process.env, ...env } : undefined })
     // Потоки обязательно читаем, иначе при заполнении буфера Moonlight зависнет на записи.
     // У каждого потока свой остаток: строка, разрезанная между кусками, не теряется.
     const collector = (): ((chunk: Buffer | null) => void) => {
@@ -228,6 +243,7 @@ export class MoonlightRunner {
   }
 
   stream(host: string, settings: StreamSettings, native?: { width: number; height: number }, policy?: StreamPolicy): MoonlightProcess {
-    return this.spawn(buildStreamArgs(host, settings, native, policy))
+    const pads = padMappingsEnv(settings.padMappings)
+    return this.spawn(buildStreamArgs(host, settings, native, policy), pads ? { SDL_GAMECONTROLLERCONFIG: pads } : undefined)
   }
 }

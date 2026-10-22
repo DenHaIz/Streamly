@@ -80,6 +80,9 @@ export const STREAM_DROPPED = /Connection terminated|lack of video traffic/i
 const RECONNECT_BUDGET = 3
 const RECONNECT_WINDOW_MS = 180_000
 
+/** Насколько битрейт может быть выше нового потолка хоста, прежде чем ради него перезапускать трансляцию. */
+const CAP_SLACK = 1.4
+
 /** Разброс задержки: среднее отклонение соседних замеров. */
 export function jitter(samples: number[]): number | undefined {
   if (samples.length < 3) return undefined
@@ -711,11 +714,12 @@ export class ClientController extends EventEmitter {
   /**
    * Битрейт заметно выше потолка хоста (хост перераспределил канал, пока мы запускались или были без связи) —
    * перезапускаем трансляцию. Повышение потолка подхватится при следующем запуске: ради него игру не прерываем.
+   * Запас 40%: второй игрок (20 → 15 Мбит/с) не перезапускает трансляцию первому, третий (→ 12) — уже да.
    */
   private checkCap(): void {
     const cap = this.state.policy?.maxBitrateKbps ?? 0
     const cur = this.state.active?.bitrateKbps ?? 0
-    if (this.state.phase !== 'streaming' || this.resuming || cap <= 0 || cur <= cap * 1.2) return
+    if (this.state.phase !== 'streaming' || this.resuming || cap <= 0 || cur <= cap * CAP_SLACK) return
     this.log(`host lowered the bitrate cap to ${cap} kbps: restarting the stream`)
     this.set({ capLowered: cap })
     this.restartStream(true)

@@ -199,7 +199,8 @@ describe('presets tuned for an RTX host', () => {
     } as unknown as Settings)
     expect(s.stream).toMatchObject(PRESETS.high)
     expect(s.host.maxBitrateKbps).toBe(-1)
-    expect(s.host.encoderPreset).toBe('balanced')
+    // «Баланс» был умолчанием до 0.6: теперь умолчание Apollo (P1), как в 0.1.
+    expect(s.host.encoderPreset).toBe('latency')
     expect(s.host.encoderCustom.nvPreset).toBe(3)
   })
 

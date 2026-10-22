@@ -697,11 +697,11 @@ describe('host ↔ client flow', () => {
     expect(moonlight.lastStream?.bitrateKbps).toBe(20000)
   }, 15000)
 
-  it('applies the encoder preset tuned for RTX by default and manual settings on request', async () => {
+  it('applies the Apollo default encoder preset (as in 0.1) by default', async () => {
     const { apollo, host } = setup()
     cleanups.push(() => host.stop())
     await host.start()
-    expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '3', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '20', max_bitrate: '20000' })
+    expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '1', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '20', max_bitrate: '20000' })
   }, 15000)
 
   it('the host reconnects a stuck gamepad: a new client restarts the stream, an old one is dropped in Apollo', async () => {
@@ -897,17 +897,18 @@ describe('host ↔ client flow', () => {
     }
     await joined(host, players[0].client)
     expect(players[0].client.getState().active?.bitrateKbps).toBe(20000)
-    // Второй игрок: потолок 15 Мбит/с, первый перезапускается с меньшим битрейтом.
+    // Второй игрок: потолок 15 Мбит/с, но ради 20 → 15 трансляцию первому не перезапускаем.
     await joined(host, players[1].client)
-    await waitFor(() => players[0].client.getState().capLowered === 15000)
-    await waitFor(() => players[0].client.getState().active?.bitrateKbps === 15000 && players[0].client.getState().phase === 'streaming', 8000)
-    // Третий: 12 Мбит/с у всех.
+    await waitFor(() => players[0].client.getState().policy?.maxBitrateKbps === 15000)
+    await new Promise((r) => setTimeout(r, 300))
+    expect(players[0].moonlight.streams).toBe(1)
+    expect(players[1].client.getState().active?.bitrateKbps).toBe(15000)
+    // Третий: 12 Мбит/с. Первый (20 Мбит/с) перезапускается, второму (15) хватает запаса.
     await joined(host, players[2].client)
-    await waitFor(() => players[0].client.getState().capLowered === 12000 && players[1].client.getState().capLowered === 12000)
-    const at12 = (i: number): boolean => players[i].client.getState().active?.bitrateKbps === 12000 && players[i].client.getState().phase === 'streaming'
-    await waitFor(() => at12(0) && at12(1) && at12(2), 8000)
-    expect(players[0].moonlight.streams).toBe(3)
-    expect(players[1].moonlight.streams).toBe(2)
+    await waitFor(() => players[0].client.getState().capLowered === 12000)
+    await waitFor(() => players[0].client.getState().active?.bitrateKbps === 12000 && players[0].client.getState().phase === 'streaming', 8000)
+    expect(players[0].moonlight.streams).toBe(2)
+    expect(players[1].moonlight.streams).toBe(1)
     expect(players[2].moonlight.streams).toBe(1)
   }, 25000)
 

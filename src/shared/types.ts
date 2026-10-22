@@ -35,10 +35,32 @@ export interface StreamSettings {
   yuv444: boolean
   /** Все геймпады этого ПК — как один (первый игрок): против двойных геймпадов (Steam Input, DS4Windows). */
   singleGamepad: boolean
+  /**
+   * Раскладки геймпадов, которых нет в базе SDL (старые DirectInput-геймпады): GUID SDL → строка раскладки SDL.
+   * Записываются мастером «Настроить кнопки» и передаются Moonlight (SDL_GAMECONTROLLERCONFIG).
+   */
+  padMappings: Record<string, string>
 }
 
 /** Качество для конкретного хоста (запоминается из меню Alt+F2). */
 export type QualityProfile = Pick<StreamSettings, 'resolution' | 'fps' | 'bitrateKbps'>
+
+/** Устройство ввода этого ПК глазами Moonlight (SDL). */
+export interface PadDeviceView {
+  guid: string
+  name: string
+  /** У SDL есть раскладка: Moonlight передаст геймпад хосту. */
+  gamepad: boolean
+  /** Раскладка записана в Streamly (мастер «Настроить кнопки»). */
+  custom: boolean
+}
+
+/** Сырые кнопки, оси (−32768…32767) и крестовины (биты: 1 вверх, 2 вправо, 4 вниз, 8 влево). */
+export interface PadRawState {
+  buttons: boolean[]
+  axes: number[]
+  hats: number[]
+}
 
 /** Какой монитор хоста транслировать: основной, виртуальный или конкретный (id устройства Apollo). */
 export type HostDisplayChoice = 'primary' | 'virtual' | string
@@ -232,7 +254,7 @@ export interface UpdateState {
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
 
-export const SETTINGS_SCHEMA = 4
+export const SETTINGS_SCHEMA = 5
 
 export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'language'> = {
   schema: SETTINGS_SCHEMA,
@@ -259,7 +281,8 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     hdr: false,
     yuv444: false,
     // Steam Input и DS4Windows у игрока показывают геймпад дважды: у хоста появлялось два. Один на ПК — частый случай.
-    singleGamepad: true
+    singleGamepad: true,
+    padMappings: {}
   },
   host: {
     maxPlayers: 4,
@@ -271,8 +294,8 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     chatRouting: true,
     // Обычная (20%, как у Apollo по умолчанию и в 0.1): «высокая» добавляет трафика, а Radmin его не прощает.
     lossProtection: 'normal',
-    // Под видеокарты NVIDIA RTX: P3 заметно чище P1 при почти той же задержке.
-    encoderPreset: 'balanced',
+    // Минимальная задержка (NVENC P1) — умолчание Apollo, как в 0.1, которая шла без рывков.
+    encoderPreset: 'latency',
     // Ручная настройка начинается со значений «Баланса» (под RTX: P3, двухпроходное в четверть разрешения).
     encoderCustom: {
       nvPreset: 3,

@@ -1,7 +1,10 @@
 // StreamlyHelper: небольшой помощник Streamly для того, чего нет в Electron.
 //  - громкость трансляции (сессия звука процесса Moonlight);
 //  - курсор на другой монитор, фокус и положение окна Moonlight;
-//  - маршрутизация звука хоста: Discord мимо трансляции (как «Echo Cancelling» в Parsec).
+//  - маршрутизация звука хоста: Discord мимо трансляции (как «Echo Cancelling» в Parsec);
+//  - горячие клавиши Streamly (перехват клавиатуры, который работает и когда Moonlight захватил клавиши);
+//  - окна Streamly поверх игры;
+//  - геймпады так, как их видит Moonlight (SDL3), и сырые кнопки для мастера раскладки.
 //
 // Собирается компилятором C# из .NET Framework 4 (есть в каждой Windows 10/11): scripts/build-helper.mjs.
 // Протокол: по строке JSON на команду в stdin, по строке JSON на ответ или событие в stdout.
@@ -22,6 +25,7 @@ namespace Streamly
     {
         static readonly object OutLock = new object();
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+        static readonly KeyHook Keys = new KeyHook();
 
         public static void Emit(Dictionary<string, object> msg)
         {
@@ -152,6 +156,18 @@ namespace Streamly
                         // Видимость не проверяем: зависшее окно Windows прячет за «призраком».
                         return Native.AnyHungWindow(Int(c, "pid"));
                     }
+                case "hotkeys":
+                    // Сочетания «id:vk:mods» (mods: 1 Ctrl, 2 Alt, 4 Shift, 8 Win); пустой список снимает перехват.
+                    Keys.Set(Strings(c, "combos"));
+                    return true;
+                case "raise":
+                    return Native.Raise(new IntPtr((long)Num(c, "hwnd")), Bool(c, "activate"));
+                case "pads":
+                    return SdlPads.List(Str(c, "sdl"), Str(c, "db"), Strings(c, "mappings"));
+                case "padState":
+                    return SdlPads.State(Str(c, "sdl"), Str(c, "db"), Str(c, "guid"));
+                case "padClose":
+                    return SdlPads.Close();
                 case "router":
                     router.Configure(Bool(c, "enabled"), Bool(c, "monitor"), Bool(c, "excludeChat"), Strings(c, "chatApps"), Strings(c, "virtualNames"));
                     return router.Snapshot();
@@ -1190,6 +1206,477 @@ namespace Streamly
     // ---------------------------------------------------------------------------------------------
     // Окна и курсор.
     // ---------------------------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------
+    // Горячие клавиши Streamly через низкоуровневый перехват клавиатуры (WH_KEYBOARD_LL).
+    //
+    // Почему не RegisterHotKey (globalShortcut Electron): Moonlight во время игры захватывает клавиатуру
+    // своим перехватчиком (SDL) и съедает Alt, Ctrl, Win, Tab и Esc. Сочетание до Windows не доходит,
+    // а Moonlight отправляет его хосту. Windows вызывает перехватчики начиная с последнего поставленного,
+    // а SDL ставит свой заново каждый раз, когда окно Moonlight получает фокус. Поэтому наш перехватчик
+    // переставляется после смены активного окна (и для надёжности раз в несколько секунд).
+    // Сработавшее сочетание съедается: оно не уходит ни в игру, ни хосту.
+    // Внедрённый программно ввод не считается: у хоста так приходят клавиши игроков от Apollo,
+    // и игрок не должен открывать меню хоста или забирать управление.
+    // ---------------------------------------------------------------------------------------------
+    sealed class KeyHook
+    {
+        const int MOD_CTRL = 1, MOD_ALT = 2, MOD_SHIFT = 4, MOD_WIN = 8;
+        const uint LLKHF_INJECTED = 0x10;
+
+        sealed class Combo
+        {
+            public string Id;
+            public int Vk;
+            public int Mods;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode, scanCode, flags, time;
+            public IntPtr dwExtraInfo;
+        }
+
+        delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+        delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
+        [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+        [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int n, IntPtr w, IntPtr l);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc fn, uint pid, uint tid, uint flags);
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+
+        readonly object sync = new object();
+        Combo[] combos = new Combo[0];
+        readonly bool[] down = new bool[256];
+        /** Клавиши сработавших сочетаний: их автоповтор и отпускание тоже съедаем. */
+        readonly HashSet<int> swallowed = new HashSet<int>();
+        IntPtr hook = IntPtr.Zero;
+        HookProc proc;
+        WinEventProc fgProc;
+        Thread thread;
+        DateTime lastInstall = DateTime.MinValue;
+        readonly List<DateTime> reinstallAt = new List<DateTime>();
+
+        /** Сочетания в виде «id:vk:mods». Пустой список — перехватчик снимается. */
+        public void Set(string[] list)
+        {
+            var next = new List<Combo>();
+            foreach (string s in list)
+            {
+                string[] p = s.Split(':');
+                if (p.Length != 3) continue;
+                int vk, mods;
+                if (!int.TryParse(p[1], out vk) || !int.TryParse(p[2], out mods) || vk <= 0 || vk > 255) continue;
+                next.Add(new Combo { Id = p[0], Vk = vk, Mods = mods });
+            }
+            lock (sync) combos = next.ToArray();
+            if (thread == null && next.Count > 0)
+            {
+                thread = new Thread(Run);
+                thread.IsBackground = true;
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+            }
+        }
+
+        void Run()
+        {
+            proc = Proc;
+            fgProc = OnForeground;
+            // EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT: вызывается в этом потоке через его очередь сообщений.
+            SetWinEventHook(3, 3, IntPtr.Zero, fgProc, 0, 0, 0);
+            var timer = new System.Windows.Forms.Timer();
+            timer.Interval = 100;
+            timer.Tick += (s, e) => Tick();
+            timer.Start();
+            Tick();
+            Application.Run();
+        }
+
+        void OnForeground(IntPtr h, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+        {
+            // SDL ставит свой перехватчик, обработав получение фокуса: переставляем свой чуть позже, несколько раз.
+            DateTime now = DateTime.UtcNow;
+            reinstallAt.Add(now.AddMilliseconds(150));
+            reinstallAt.Add(now.AddMilliseconds(600));
+            reinstallAt.Add(now.AddMilliseconds(1500));
+        }
+
+        void Tick()
+        {
+            bool want;
+            lock (sync) want = combos.Length > 0;
+            if (!want)
+            {
+                if (hook != IntPtr.Zero)
+                {
+                    UnhookWindowsHookEx(hook);
+                    hook = IntPtr.Zero;
+                }
+                reinstallAt.Clear();
+                return;
+            }
+            DateTime now = DateTime.UtcNow;
+            bool due = hook == IntPtr.Zero || (now - lastInstall).TotalSeconds >= 3;
+            for (int i = reinstallAt.Count - 1; i >= 0; i--)
+            {
+                if (reinstallAt[i] <= now)
+                {
+                    due = true;
+                    reinstallAt.RemoveAt(i);
+                }
+            }
+            if (due) Install();
+        }
+
+        void Install()
+        {
+            bool fresh = hook == IntPtr.Zero;
+            if (fresh)
+            {
+                // Перехватчика не было: какие модификаторы сейчас зажаты, узнаём у Windows.
+                foreach (int vk in new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C }) down[vk] = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                swallowed.Clear();
+            }
+            // Новый ставим раньше, чем снимаем старый: ни одно нажатие не проскакивает между ними.
+            IntPtr next = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0);
+            if (next == IntPtr.Zero) return;
+            if (hook != IntPtr.Zero) UnhookWindowsHookEx(hook);
+            hook = next;
+            lastInstall = DateTime.UtcNow;
+        }
+
+        static int ModOf(int vk)
+        {
+            switch (vk)
+            {
+                case 0x10:
+                case 0xA0:
+                case 0xA1:
+                    return MOD_SHIFT;
+                case 0x11:
+                case 0xA2:
+                case 0xA3:
+                    return MOD_CTRL;
+                case 0x12:
+                case 0xA4:
+                case 0xA5:
+                    return MOD_ALT;
+                case 0x5B:
+                case 0x5C:
+                    return MOD_WIN;
+                default:
+                    return 0;
+            }
+        }
+
+        int Mods()
+        {
+            int m = 0;
+            if (down[0xA2] || down[0xA3]) m |= MOD_CTRL;
+            if (down[0xA4] || down[0xA5]) m |= MOD_ALT;
+            if (down[0xA0] || down[0xA1]) m |= MOD_SHIFT;
+            if (down[0x5B] || down[0x5C]) m |= MOD_WIN;
+            return m;
+        }
+
+        IntPtr Proc(int n, IntPtr w, IntPtr l)
+        {
+            if (n >= 0)
+            {
+                var k = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(l, typeof(KBDLLHOOKSTRUCT));
+                int msg = w.ToInt32();
+                bool isDown = msg == 0x100 || msg == 0x104;
+                bool isUp = msg == 0x101 || msg == 0x105;
+                int vk = (int)(k.vkCode & 0xFF);
+                if ((k.flags & LLKHF_INJECTED) == 0 && (isDown || isUp))
+                {
+                    if (ModOf(vk) != 0)
+                    {
+                        down[vk] = isDown;
+                    }
+                    else if (isDown)
+                    {
+                        if (swallowed.Contains(vk)) return (IntPtr)1;
+                        Combo hit = null;
+                        int mods = Mods();
+                        lock (sync)
+                        {
+                            foreach (Combo c in combos)
+                            {
+                                if (c.Vk == vk && c.Mods == mods)
+                                {
+                                    hit = c;
+                                    break;
+                                }
+                            }
+                        }
+                        if (hit != null)
+                        {
+                            swallowed.Add(vk);
+                            // Alt или Win, отпущенные без другой клавиши, открыли бы меню окна или «Пуск»:
+                            // «нажимаем» пустую клавишу (её никто не обрабатывает).
+                            if ((hit.Mods & (MOD_ALT | MOD_WIN)) != 0) Native.TapDummyKey();
+                            string id = hit.Id;
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                var m = new Dictionary<string, object>();
+                                m["event"] = "hotkey";
+                                m["id"] = id;
+                                Program.Emit(m);
+                            });
+                            return (IntPtr)1;
+                        }
+                    }
+                    else if (swallowed.Remove(vk))
+                    {
+                        return (IntPtr)1;
+                    }
+                }
+            }
+            return CallNextHookEx(IntPtr.Zero, n, w, l);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Геймпады глазами Moonlight. Используется тот же SDL3.dll, что у Moonlight (его SDL2.dll — обёртка
+    // над SDL3), и та же база раскладок (gamecontrollerdb.txt рядом с Moonlight): GUID, номера кнопок,
+    // осей и крестовин совпадают с тем, что видит Moonlight. Геймпад без раскладки SDL не считает
+    // геймпадом, и Moonlight его не передаёт хосту (так бывает со старыми DirectInput-геймпадами).
+    // Раскладку для него Streamly собирает по нажатиям (мастер в настройках) и передаёт Moonlight
+    // через переменную окружения SDL_GAMECONTROLLERCONFIG.
+    // SDL работает в отдельном потоке, который регулярно обрабатывает его сообщения; через минуту без
+    // запросов SDL закрывается и отпускает устройства.
+    // ---------------------------------------------------------------------------------------------
+    static class SdlPads
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct SDL_GUID
+        {
+            public ulong a, b;
+        }
+
+        const string Dll = "SDL3.dll";
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryW(string path);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] static extern bool SDL_Init(uint flags);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_Quit();
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] static extern bool SDL_SetHint(byte[] name, byte[] value);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern IntPtr SDL_GetError();
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_PumpEvents();
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_free(IntPtr p);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern IntPtr SDL_GetJoysticks(out int count);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern IntPtr SDL_GetJoystickNameForID(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern SDL_GUID SDL_GetJoystickGUIDForID(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_GUIDToString(SDL_GUID guid, byte[] buf, int len);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern ushort SDL_GetJoystickVendorForID(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern ushort SDL_GetJoystickProductForID(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] static extern bool SDL_IsGamepad(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern IntPtr SDL_OpenJoystick(uint id);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_CloseJoystick(IntPtr j);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_GetNumJoystickButtons(IntPtr j);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_GetNumJoystickAxes(IntPtr j);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_GetNumJoystickHats(IntPtr j);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_UpdateJoysticks();
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] static extern bool SDL_GetJoystickButton(IntPtr j, int i);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern short SDL_GetJoystickAxis(IntPtr j, int i);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern byte SDL_GetJoystickHat(IntPtr j, int i);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_AddGamepadMapping(byte[] mapping);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_AddGamepadMappingsFromFile(byte[] file);
+
+        const uint SDL_INIT_GAMEPAD = 0x2000;
+
+        static readonly System.Collections.Concurrent.BlockingCollection<Action> queue = new System.Collections.Concurrent.BlockingCollection<Action>();
+        static Thread thread;
+        static string loadedFrom;
+        static bool inited;
+        static DateTime lastUse;
+        static IntPtr openJoy = IntPtr.Zero;
+        static string openGuid;
+        static readonly HashSet<string> added = new HashSet<string>();
+
+        static byte[] Utf8(string s)
+        {
+            return Encoding.UTF8.GetBytes(s + "\0");
+        }
+
+        static string FromUtf8(IntPtr p)
+        {
+            if (p == IntPtr.Zero) return "";
+            int len = 0;
+            while (Marshal.ReadByte(p, len) != 0) len++;
+            var buf = new byte[len];
+            Marshal.Copy(p, buf, 0, len);
+            return Encoding.UTF8.GetString(buf);
+        }
+
+        /** Выполнить в потоке SDL и дождаться результата. */
+        static object Run(Func<object> fn)
+        {
+            if (thread == null)
+            {
+                thread = new Thread(Loop);
+                thread.IsBackground = true;
+                thread.Start();
+            }
+            object result = null;
+            Exception error = null;
+            var done = new ManualResetEventSlim(false);
+            queue.Add(() =>
+            {
+                try
+                {
+                    result = fn();
+                }
+                catch (Exception e)
+                {
+                    error = e;
+                }
+                done.Set();
+            });
+            if (!done.Wait(5000)) throw new Exception("sdl: timeout");
+            if (error != null) throw error;
+            return result;
+        }
+
+        static void Loop()
+        {
+            while (true)
+            {
+                Action a;
+                if (queue.TryTake(out a, 50))
+                {
+                    lastUse = DateTime.UtcNow;
+                    a();
+                }
+                if (!inited) continue;
+                SDL_PumpEvents();
+                if ((DateTime.UtcNow - lastUse).TotalSeconds > 60) Shutdown();
+            }
+        }
+
+        static void Shutdown()
+        {
+            if (openJoy != IntPtr.Zero) SDL_CloseJoystick(openJoy);
+            openJoy = IntPtr.Zero;
+            openGuid = null;
+            SDL_Quit();
+            inited = false;
+            added.Clear();
+        }
+
+        static void Ensure(string sdlPath, string dbPath, string[] mappings)
+        {
+            if (loadedFrom == null)
+            {
+                if (LoadLibraryW(sdlPath) == IntPtr.Zero) throw new Exception("SDL3 not found: " + sdlPath);
+                loadedFrom = sdlPath;
+            }
+            if (!inited)
+            {
+                // Помощник без окна: события геймпадов нужны и в фоне.
+                SDL_SetHint(Utf8("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"), Utf8("1"));
+                if (!SDL_Init(SDL_INIT_GAMEPAD)) throw new Exception("SDL_Init: " + FromUtf8(SDL_GetError()));
+                inited = true;
+                if (dbPath.Length > 0 && System.IO.File.Exists(dbPath)) SDL_AddGamepadMappingsFromFile(Utf8(dbPath));
+            }
+            foreach (string m in mappings)
+            {
+                if (added.Add(m)) SDL_AddGamepadMapping(Utf8(m));
+            }
+            SDL_PumpEvents();
+            SDL_UpdateJoysticks();
+        }
+
+        static List<uint> Ids()
+        {
+            int count;
+            IntPtr p = SDL_GetJoysticks(out count);
+            var ids = new List<uint>();
+            if (p == IntPtr.Zero) return ids;
+            for (int i = 0; i < count; i++) ids.Add((uint)Marshal.ReadInt32(p, i * 4));
+            SDL_free(p);
+            return ids;
+        }
+
+        static string GuidOf(uint id)
+        {
+            var buf = new byte[33];
+            SDL_GUIDToString(SDL_GetJoystickGUIDForID(id), buf, buf.Length);
+            return Encoding.ASCII.GetString(buf, 0, 32);
+        }
+
+        /** Геймпады и джойстики этого ПК так, как их увидит Moonlight. */
+        public static object List(string sdlPath, string dbPath, string[] mappings)
+        {
+            return Run(() =>
+            {
+                Ensure(sdlPath, dbPath, mappings);
+                var list = new List<object>();
+                foreach (uint id in Ids())
+                {
+                    var d = new Dictionary<string, object>();
+                    d["guid"] = GuidOf(id);
+                    d["name"] = FromUtf8(SDL_GetJoystickNameForID(id));
+                    d["vendor"] = (int)SDL_GetJoystickVendorForID(id);
+                    d["product"] = (int)SDL_GetJoystickProductForID(id);
+                    d["gamepad"] = SDL_IsGamepad(id);
+                    list.Add(d);
+                }
+                return list;
+            });
+        }
+
+        /** Сырые кнопки, оси и крестовины устройства (для мастера раскладки). null — устройство не найдено. */
+        public static object State(string sdlPath, string dbPath, string guid)
+        {
+            return Run(() =>
+            {
+                Ensure(sdlPath, dbPath, new string[0]);
+                if (openJoy == IntPtr.Zero || openGuid != guid)
+                {
+                    if (openJoy != IntPtr.Zero) SDL_CloseJoystick(openJoy);
+                    openJoy = IntPtr.Zero;
+                    openGuid = null;
+                    foreach (uint id in Ids())
+                    {
+                        if (GuidOf(id) != guid) continue;
+                        openJoy = SDL_OpenJoystick(id);
+                        openGuid = guid;
+                        break;
+                    }
+                    if (openJoy == IntPtr.Zero) return null;
+                }
+                SDL_UpdateJoysticks();
+                var d = new Dictionary<string, object>();
+                int nb = SDL_GetNumJoystickButtons(openJoy), na = SDL_GetNumJoystickAxes(openJoy), nh = SDL_GetNumJoystickHats(openJoy);
+                var b = new List<object>();
+                for (int i = 0; i < nb; i++) b.Add(SDL_GetJoystickButton(openJoy, i));
+                var a = new List<object>();
+                for (int i = 0; i < na; i++) a.Add((int)SDL_GetJoystickAxis(openJoy, i));
+                var h = new List<object>();
+                for (int i = 0; i < nh; i++) h.Add((int)SDL_GetJoystickHat(openJoy, i));
+                d["buttons"] = b;
+                d["axes"] = a;
+                d["hats"] = h;
+                return d;
+            });
+        }
+
+        public static object Close()
+        {
+            if (thread == null) return true;
+            return Run(() =>
+            {
+                if (openJoy != IntPtr.Zero) SDL_CloseJoystick(openJoy);
+                openJoy = IntPtr.Zero;
+                openGuid = null;
+                return true;
+            });
+        }
+    }
+
     static class Native
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -1390,6 +1877,31 @@ namespace Streamly
             for (int i = keys.Length - 1; i >= 0; i--) inputs.Add(new INPUT { type = 1, ki = new KEYBDINPUT { wVk = Vk(keys[i]), dwFlags = 2 } });
             INPUT[] arr = inputs.ToArray();
             return SendInput((uint)arr.Length, arr, Marshal.SizeOf(typeof(INPUT))) == arr.Length;
+        }
+
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        /** Пустая клавиша (0xFF): её никто не обрабатывает, но Windows больше не считает Alt или Win нажатыми «в одиночку». */
+        public static void TapDummyKey()
+        {
+            var arr = new[] { new INPUT { type = 1, ki = new KEYBDINPUT { wVk = 0xFF } }, new INPUT { type = 1, ki = new KEYBDINPUT { wVk = 0xFF, dwFlags = 2 } } };
+            SendInput(2, arr, Marshal.SizeOf(typeof(INPUT)));
+        }
+
+        /**
+         * Окно Streamly поверх всех, в том числе поверх игры в окне «без рамки» (она тоже бывает «поверх всех»).
+         * activate — ещё и сделать активным. Windows отдаёт фокус только процессу, от которого пришёл последний ввод:
+         * сначала «нажимаем» пустую клавишу от имени помощника, затем запасной путь через поток ввода активного окна.
+         */
+        public static bool Raise(IntPtr h, bool activate)
+        {
+            const uint NOSIZE = 0x1, NOMOVE = 0x2, NOACTIVATE = 0x10, SHOWWINDOW = 0x40;
+            SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, NOSIZE | NOMOVE | SHOWWINDOW | (activate ? 0 : NOACTIVATE));
+            if (!activate || GetForegroundWindow() == h) return true;
+            TapDummyKey();
+            if (SetForegroundWindow(h) && GetForegroundWindow() == h) return true;
+            Activate(h);
+            return GetForegroundWindow() == h;
         }
 
         /** Делает окно активным. Если Windows запрещает (окно другого процесса), подключаемся к его потоку ввода. */

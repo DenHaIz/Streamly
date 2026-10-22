@@ -54,6 +54,52 @@ export function keyFromCode(code: string): string | null {
   return CODES[code] ?? null
 }
 
+const VK: Record<string, number> = {
+  Space: 0x20,
+  Tab: 0x09,
+  Insert: 0x2d,
+  Delete: 0x2e,
+  Home: 0x24,
+  End: 0x23,
+  PageUp: 0x21,
+  PageDown: 0x22,
+  Up: 0x26,
+  Down: 0x28,
+  Left: 0x25,
+  Right: 0x27,
+  Plus: 0xbb,
+  '=': 0xbb,
+  '-': 0xbd,
+  '[': 0xdb,
+  ']': 0xdd,
+  ';': 0xba,
+  "'": 0xde,
+  ',': 0xbc,
+  '.': 0xbe,
+  '/': 0xbf,
+  '\\': 0xdc,
+  '`': 0xc0
+}
+
+/**
+ * Сочетание для перехвата клавиатуры помощником: «vk:mods» (код виртуальной клавиши Windows,
+ * модификаторы: 1 Ctrl, 2 Alt, 4 Shift, 8 Win). null — сочетание выключено или не разобрано.
+ */
+export function comboOf(acc: string): string | null {
+  if (!acc || !isAccelerator(acc)) return null
+  const parts = acc.split('+')
+  const key = parts.pop()!
+  let vk: number | undefined
+  const f = /^F(\d+)$/.exec(key)
+  if (f) vk = 0x6f + Number(f[1])
+  else if (/^[A-Z0-9]$/.test(key)) vk = key.charCodeAt(0)
+  else vk = VK[key]
+  if (!vk) return null
+  const bits: Record<string, number> = { Ctrl: 1, Alt: 2, Shift: 4, Super: 8 }
+  const mods = parts.reduce((m, p) => m | (bits[p] ?? 0), 0)
+  return `${vk}:${mods}`
+}
+
 /** Сочетание из нажатия: модификаторы в порядке Ctrl, Alt, Shift, Super. */
 export function acceleratorFromEvent(e: { code: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }): string | null {
   const key = keyFromCode(e.code)

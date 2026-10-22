@@ -11,6 +11,7 @@ import { PixelLogo } from '@/components/PixelLogo'
 import { EncoderCustomPanel } from '@/components/EncoderCustomPanel'
 import { UpdatePanel } from '@/components/Update'
 import { HotkeysCard } from '@/components/Hotkeys'
+import { PadsCard } from '@/components/Pads'
 import { useVolume } from '@/components/StreamControls'
 import { Avatar, Button, Collapse, Row, Segmented, Select, Slider, softSpring, spring, Switch } from '@/components/ui'
 
@@ -262,6 +263,7 @@ function StreamTab() {
           </span>
         </Row>
       </div>
+      <PadsCard />
       <AdvancedCard title={t('settings.advancedStream')}>
         <Row title={t('settings.resolution')}>
           <Select<Resolution>

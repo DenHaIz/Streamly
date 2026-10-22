@@ -1908,3 +1908,136 @@ html.notify-mode body {
   text-align: center;
   box-shadow: var(--shadow);
 }
+
+/* ---------- Геймпады (настройки трансляции) ---------- */
+.pads-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.pads-empty {
+  padding: 10px 2px 4px;
+}
+
+.pads-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pad-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.pad-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.pad-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.pad-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pad-status {
+  margin-top: 4px;
+}
+
+.pad-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.pad-wizard {
+  width: min(460px, calc(100vw - 64px));
+}
+
+.pad-progress {
+  height: 6px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.pad-progress-bar {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+}
+
+.pad-prompt {
+  min-height: 108px;
+  display: grid;
+  align-items: center;
+  text-align: center;
+  padding: 18px 8px 10px;
+}
+
+.pad-prompt-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 19px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.pad-prompt-text.warn,
+.pad-prompt-sub.warn {
+  color: var(--warning-text);
+}
+
+.pad-step-count {
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+
+.pad-prompt-sub {
+  font-size: 12.5px;
+  margin-top: 8px;
+}
+
+.pad-binds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  margin-bottom: 14px;
+}
+
+.pad-binds .pill {
+  transition: background-color 0.25s var(--ease), color 0.25s var(--ease);
+}
+
+.pad-wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  .pad-row {
+    flex-wrap: wrap;
+  }
+
+  .pad-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

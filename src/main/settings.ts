@@ -82,6 +82,18 @@ function normalizeHotkeys(h: Partial<HotkeySettings> | undefined): HotkeySetting
 export const isDisplayId = (v: unknown): v is string => typeof v === 'string' && /^\{[0-9a-fA-F-]{36}\}$/.test(v)
 
 /** Приводит настройки к допустимым значениям (данные приходят из renderer и с диска). */
+/** Раскладки геймпадов: ключ — GUID SDL, значение — строка раскладки SDL с этим же GUID (без переводов строк). */
+export function normalizePadMappings(v: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!v || typeof v !== 'object') return out
+  for (const [guid, m] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^[0-9a-f]{32}$/.test(guid) || typeof m !== 'string' || m.length > 1500 || /[\r\n]/.test(m) || !m.startsWith(`${guid},`)) continue
+    out[guid] = m
+    if (Object.keys(out).length >= 16) break
+  }
+  return out
+}
+
 export function normalizeSettings(s: Settings): Settings {
   const d = DEFAULT_SETTINGS
   const st = s.stream
@@ -100,6 +112,9 @@ export function normalizeSettings(s: Settings): Settings {
   // Её не выбирали сами (настройка в дополнительных), поэтому возвращаем обычную.
   const v3 = !(Number(s.schema) >= 4)
   const lossIn = v3 && s.host?.lossProtection === 'high' ? 'normal' : s.host?.lossProtection
+  // Версия 4: пресет кодировщика по умолчанию был «Баланс» (NVENC P3); теперь умолчание Apollo, как в 0.1.
+  const v4 = !(Number(s.schema) >= 5)
+  const presetIn = v4 && s.host?.encoderPreset === 'balanced' ? 'latency' : s.host?.encoderPreset
   const display = typeof s.host?.display === 'string' ? s.host.display : legacyVirtual ? 'virtual' : d.host.display
   return {
     schema: SETTINGS_SCHEMA,
@@ -127,7 +142,8 @@ export function normalizeSettings(s: Settings): Settings {
       autoQuality: bool(st?.autoQuality, d.stream.autoQuality),
       hdr: bool(st?.hdr, d.stream.hdr),
       yuv444: bool(st?.yuv444, d.stream.yuv444),
-      singleGamepad: bool(st?.singleGamepad, d.stream.singleGamepad)
+      singleGamepad: bool(st?.singleGamepad, d.stream.singleGamepad),
+      padMappings: normalizePadMappings(st?.padMappings)
     },
     host: {
       maxPlayers: clampInt(s.host?.maxPlayers, 1, 4, d.host.maxPlayers),
@@ -139,7 +155,7 @@ export function normalizeSettings(s: Settings): Settings {
       keepHostAudio: bool(s.host?.keepHostAudio, d.host.keepHostAudio),
       chatRouting: bool(s.host?.chatRouting, d.host.chatRouting),
       lossProtection: oneOf(lossIn, ['normal', 'high'] as const, d.host.lossProtection),
-      encoderPreset: oneOf(s.host?.encoderPreset, ['latency', 'balanced', 'quality', 'custom'] as const, d.host.encoderPreset),
+      encoderPreset: oneOf(presetIn, ['latency', 'balanced', 'quality', 'custom'] as const, d.host.encoderPreset),
       encoderCustom: normalizeEncoder(s.host?.encoderCustom),
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
       autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting),

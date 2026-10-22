@@ -282,8 +282,8 @@ describe('host ↔ client flow', () => {
     await host.respond(req.id, 'trust')
     await waitFor(() => client.getState().phase === 'streaming')
     // Хост передал условия трансляции, а задержка до хоста измеряется
-    // «Авто»: одному игроку 30 Мбит/с (при 3–4 — 20).
-    expect(client.getState().policy).toMatchObject({ hostAudio: true, maxBitrateKbps: 30000, hostWidth: 1920 })
+    // «Авто»: одному игроку 20 Мбит/с, как в 0.1.
+    expect(client.getState().policy).toMatchObject({ hostAudio: true, maxBitrateKbps: 20000, hostWidth: 1920 })
     await waitFor(() => client.getState().rttMs !== undefined)
     const ac = apollo.clients[0]
     expect(ac.name).toContain('Вася')
@@ -693,15 +693,15 @@ describe('host ↔ client flow', () => {
     const st = client.getState()
     expect(st.speedMbps).toBeGreaterThan(0)
     expect(st.active?.auto).toBe(true)
-    // Через loopback канал быстрый: упираемся в потолок хоста («Авто» для одного игрока — 30 Мбит/с).
-    expect(moonlight.lastStream?.bitrateKbps).toBe(30000)
+    // Через loopback канал быстрый: упираемся в потолок хоста («Авто» для одного игрока — 20 Мбит/с).
+    expect(moonlight.lastStream?.bitrateKbps).toBe(20000)
   }, 15000)
 
   it('applies the encoder preset tuned for RTX by default and manual settings on request', async () => {
     const { apollo, host } = setup()
     cleanups.push(() => host.stop())
     await host.start()
-    expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '3', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '30', max_bitrate: '30000' })
+    expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '3', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '20', max_bitrate: '20000' })
   }, 15000)
 
   it('the host reconnects a stuck gamepad: a new client restarts the stream, an old one is dropped in Apollo', async () => {
@@ -896,13 +896,18 @@ describe('host ↔ client flow', () => {
       cleanups.push(() => p.client.cancel())
     }
     await joined(host, players[0].client)
+    expect(players[0].client.getState().active?.bitrateKbps).toBe(20000)
+    // Второй игрок: потолок 15 Мбит/с, первый перезапускается с меньшим битрейтом.
     await joined(host, players[1].client)
-    expect(players[0].client.getState().active?.bitrateKbps).toBe(30000)
+    await waitFor(() => players[0].client.getState().capLowered === 15000)
+    await waitFor(() => players[0].client.getState().active?.bitrateKbps === 15000 && players[0].client.getState().phase === 'streaming', 8000)
+    // Третий: 12 Мбит/с у всех.
     await joined(host, players[2].client)
-    // Третий игрок: потолок 20 Мбит/с, первые двое перезапускаются с меньшим битрейтом.
-    await waitFor(() => players[0].client.getState().capLowered === 20000 && players[1].client.getState().capLowered === 20000)
-    await waitFor(() => players[0].client.getState().active?.bitrateKbps === 20000 && players[0].client.getState().phase === 'streaming', 8000)
-    expect(players[0].moonlight.streams).toBe(2)
+    await waitFor(() => players[0].client.getState().capLowered === 12000 && players[1].client.getState().capLowered === 12000)
+    const at12 = (i: number): boolean => players[i].client.getState().active?.bitrateKbps === 12000 && players[i].client.getState().phase === 'streaming'
+    await waitFor(() => at12(0) && at12(1) && at12(2), 8000)
+    expect(players[0].moonlight.streams).toBe(3)
+    expect(players[1].moonlight.streams).toBe(2)
     expect(players[2].moonlight.streams).toBe(1)
   }, 25000)
 

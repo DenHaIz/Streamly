@@ -43,17 +43,14 @@ export function lowerProfile(p: QualityProfile, base: Pick<StreamSettings, 'reso
   return profileFor(Math.max(MIN_BITRATE, Math.round((from * 0.7) / 500) * 500), base)
 }
 
-const median = (xs: number[]): number => {
-  const s = [...xs].sort((a, b) => a - b)
-  return s[Math.floor(s.length / 2)] ?? 0
-}
-
 /**
  * Похоже ли на ретранслятор Radmin: прямое соединение внутри страны обычно даёт 5–40 мс.
  * Высокая задержка или медленный канал при средней задержке — повод проверить тип соединения в Radmin.
+ * Берём наименьшую задержку, а не медиану: во время игры замеры раздувает очередь за самим видеопотоком
+ * (забитый канал), и медиана показывала бы «ретранслятор» на прямом соединении.
  */
 export function relaySuspect(rtts: number[], speedMbps?: number): boolean {
   if (rtts.length < 3) return false
-  const m = median(rtts)
+  const m = Math.min(...rtts)
   return m >= 80 || (speedMbps !== undefined && speedMbps < 10 && m >= 35)
 }

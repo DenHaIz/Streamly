@@ -75,8 +75,8 @@ export interface HostSettings {
   /** Виртуальный монитор: на время игры выключать физические мониторы хоста (друзья видят весь рабочий стол). */
   virtualOnly: boolean
   /**
-   * Потолок битрейта на одного игрока, кбит/с: 0 — без ограничения, -1 — авто (30 Мбит/с на 1–2 игроков,
-   * 20 — на 3–4). Apollo кодирует поток каждому отдельно.
+   * Потолок битрейта на одного игрока, кбит/с: 0 — без ограничения, -1 — авто (20 Мбит/с одному игроку,
+   * меньше при нескольких: autoBitrateCap). Apollo кодирует поток каждому отдельно.
    */
   maxBitrateKbps: number
   /** Звук игры остаётся и на колонках хоста (иначе Apollo может переключить вывод на виртуальное устройство). */
@@ -232,7 +232,7 @@ export interface UpdateState {
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
 
-export const SETTINGS_SCHEMA = 3
+export const SETTINGS_SCHEMA = 4
 
 export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'language'> = {
   schema: SETTINGS_SCHEMA,
@@ -269,7 +269,8 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     maxBitrateKbps: -1,
     keepHostAudio: true,
     chatRouting: true,
-    lossProtection: 'high',
+    // Обычная (20%, как у Apollo по умолчанию и в 0.1): «высокая» добавляет трафика, а Radmin его не прощает.
+    lossProtection: 'normal',
     // Под видеокарты NVIDIA RTX: P3 заметно чище P1 при почти той же задержке.
     encoderPreset: 'balanced',
     // Ручная настройка начинается со значений «Баланса» (под RTX: P3, двухпроходное в четверть разрешения).

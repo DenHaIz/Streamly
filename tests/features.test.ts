@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { effectivePerms, NO_INPUT, PERM, toApolloPerm } from '@shared/perms'
 import { parseClientMessage, parseHostMessage } from '@shared/protocol'
-import type { Settings } from '@shared/types'
+import { SETTINGS_SCHEMA, type Settings } from '@shared/types'
 import { parseDisplayDevices } from '../src/main/services/apollo/displays'
 import { jitter, parseConnectionStatus } from '../src/main/services/client/controller'
 import { buildStreamArgs } from '../src/main/services/moonlight/runner'
@@ -99,7 +99,7 @@ describe('settings migration', () => {
 
   it('moves 0.1 users to borderless full screen and keeps the virtual monitor choice', () => {
     const s = normalizeSettings(base({ stream: { displayMode: 'fullscreen' }, host: { useVirtualDisplay: true } }))
-    expect(s.schema).toBe(3)
+    expect(s.schema).toBe(SETTINGS_SCHEMA)
     expect(s.stream.displayMode).toBe('borderless')
     expect(s.host.display).toBe('virtual')
     expect(s.stream.volume).toBe(100)
@@ -180,6 +180,8 @@ describe('auto quality', () => {
   it('suspects the Radmin relay from latency and speed', () => {
     expect(relaySuspect([10, 12, 11, 9])).toBe(false)
     expect(relaySuspect([95, 90, 110])).toBe(true)
+    // Очередь за собственным видеопотоком раздувает отдельные замеры: прямое соединение остаётся прямым.
+    expect(relaySuspect([12, 400, 350, 15, 600])).toBe(false)
     expect(relaySuspect([40, 45, 38], 6)).toBe(true)
   })
 })
@@ -202,9 +204,22 @@ describe('presets tuned for an RTX host', () => {
   })
 
   it('auto cap shares the upload between players', () => {
-    expect(autoBitrateCap(1)).toBe(30000)
-    expect(autoBitrateCap(2)).toBe(30000)
-    expect(autoBitrateCap(4)).toBe(20000)
+    // Одному — как в 0.1 (20 Мбит/с), дальше канал хоста делится.
+    expect(autoBitrateCap(1)).toBe(20000)
+    expect(autoBitrateCap(2)).toBe(15000)
+    expect(autoBitrateCap(3)).toBe(12000)
+    expect(autoBitrateCap(4)).toBe(10000)
+  })
+
+  it('0.5.1 settings: the high loss protection default turns back into normal, a fresh install starts with normal', () => {
+    const base = { nickname: 'A', deviceId: '00000000-0000-4000-8000-000000000000' }
+    expect(normalizeSettings({ ...base, schema: 3, host: { lossProtection: 'high', maxBitrateKbps: -1 } } as unknown as Settings).host).toMatchObject({
+      lossProtection: 'normal',
+      maxBitrateKbps: -1
+    })
+    // Выбор, сделанный уже в новой версии, сохраняется.
+    expect(normalizeSettings({ ...base, schema: 4, host: { lossProtection: 'high' } } as unknown as Settings).host.lossProtection).toBe('high')
+    expect(normalizeSettings({ ...base } as unknown as Settings).host.lossProtection).toBe('normal')
   })
 
   it('never streams more FPS than the player screen shows', () => {

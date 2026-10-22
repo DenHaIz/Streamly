@@ -96,6 +96,10 @@ export function normalizeSettings(s: Settings): Settings {
     ? Object.fromEntries(Object.entries(s.hostQuality).map(([k, q]) => [k, q && typeof q === 'object' ? migratePreset(q) : q]))
     : s.hostQuality
   const maxBitrateIn = v2 && s.host?.maxBitrateKbps === 20000 ? -1 : s.host?.maxBitrateKbps
+  // Версия 3: «высокая» защита от потерь стояла по умолчанию и вместе с потолком 30 Мбит/с перегружала канал.
+  // Её не выбирали сами (настройка в дополнительных), поэтому возвращаем обычную.
+  const v3 = !(Number(s.schema) >= 4)
+  const lossIn = v3 && s.host?.lossProtection === 'high' ? 'normal' : s.host?.lossProtection
   const display = typeof s.host?.display === 'string' ? s.host.display : legacyVirtual ? 'virtual' : d.host.display
   return {
     schema: SETTINGS_SCHEMA,
@@ -134,7 +138,7 @@ export function normalizeSettings(s: Settings): Settings {
       maxBitrateKbps: maxBitrateIn === 0 || maxBitrateIn === -1 ? maxBitrateIn : clampInt(maxBitrateIn, 2000, 150000, d.host.maxBitrateKbps),
       keepHostAudio: bool(s.host?.keepHostAudio, d.host.keepHostAudio),
       chatRouting: bool(s.host?.chatRouting, d.host.chatRouting),
-      lossProtection: oneOf(s.host?.lossProtection, ['normal', 'high'] as const, d.host.lossProtection),
+      lossProtection: oneOf(lossIn, ['normal', 'high'] as const, d.host.lossProtection),
       encoderPreset: oneOf(s.host?.encoderPreset, ['latency', 'balanced', 'quality', 'custom'] as const, d.host.encoderPreset),
       encoderCustom: normalizeEncoder(s.host?.encoderCustom),
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),

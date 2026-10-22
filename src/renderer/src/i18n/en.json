@@ -369,7 +369,7 @@
       "quality": "NVENC P5 with adaptive quantization: best picture, +1–3 ms per frame. For 1–2 players on a strong GPU",
       "custom": "Settings for each GPU below: Apollo uses the ones that match the encoder it found"
     },
-    "bitrateCapAuto": "Auto: 30 Mbps, 20 with 3–4 players",
+    "bitrateCapAuto": "Auto: 20 Mbps for one player, 15 for two, 10–12 for three or four",
     "encoderCustomHint": "Defaults are tuned for NVIDIA RTX 40/50 and a Ryzen CPU. With an AMD graphics card or an Intel CPU with integrated graphics, tune your group: Apollo uses the settings of the encoder it found (marked). Applied by restarting Apollo when nobody is playing.",
     "encoderUsed": "in use",
     "enc": {

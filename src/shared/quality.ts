@@ -36,11 +36,12 @@ export function migratePreset<T extends QualityProfile>(q: T): T {
 }
 
 /**
- * «Авто» для потолка битрейта на игрока: 30 Мбит/с, пока игроков один-два, 20 — при трёх-четырёх
- * (исходящий канал хоста и FEC 30% делятся на всех).
+ * «Авто» для потолка битрейта на игрока. Одному — 20 Мбит/с, как в 0.1, которая работала через Radmin
+ * без обрывов (в 0.2–0.5 было 30, и вместе с FEC 30% поток вырос с ~24 до ~39 Мбит/с — обрывы и рывки).
+ * Исходящий канал хоста общий, поэтому с каждым игроком потолок ниже: всего ~20–40 Мбит/с.
  */
 export function autoBitrateCap(players: number): number {
-  return players <= 2 ? 30000 : 20000
+  return players <= 1 ? 20000 : players === 2 ? 15000 : players === 3 ? 12000 : 10000
 }
 
-export const AUTO_BITRATE_CAP_MAX = 30000
+export const AUTO_BITRATE_CAP_MAX = 20000

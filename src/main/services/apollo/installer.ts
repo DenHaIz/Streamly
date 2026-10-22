@@ -93,6 +93,8 @@ export interface ApolloInstallStatus {
   sunshineRunning: boolean
   /** Служба Apollo с ручным запуском и правом управления для пользователя (Streamly включает её только на время хостинга). */
   serviceControl: boolean
+  /** Версия установленного Apollo (из свойств sunshine.exe), если удалось прочитать. */
+  version?: string
 }
 
 async function serviceState(name: string): Promise<'missing' | 'running' | 'stopped'> {
@@ -141,24 +143,29 @@ export class ApolloInstaller {
   }
 
   async status(): Promise<ApolloInstallStatus> {
-    const [svc, vigem, sunshine, fw, qc, sd] = await Promise.all([
+    const exe = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Apollo', 'sunshine.exe')
+    const [svc, vigem, sunshine, fw, qc, sd, ver] = await Promise.all([
       serviceState(APOLLO_SERVICE),
       serviceState('ViGEmBus'),
       serviceState('SunshineService'),
       run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', FIREWALL_QUERY]),
       run('sc.exe', ['qc', APOLLO_SERVICE]),
-      run('sc.exe', ['sdshow', APOLLO_SERVICE])
+      run('sc.exe', ['sdshow', APOLLO_SERVICE]),
+      existsSync(exe)
+        ? run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Item -LiteralPath '${exe.replace(/'/g, "''")}').VersionInfo.ProductVersion`])
+        : Promise.resolve({ code: 1, stdout: '', stderr: '' })
     ])
     // START_TYPE 3 = DEMAND_START (ручной запуск).
     const manual = /START_TYPE\s*:\s*3\b/.test(qc.stdout)
-    const exe = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Apollo', 'sunshine.exe')
+    const version = /\d+\.\d+\.\d+/.exec(ver.stdout)?.[0]
     return {
       installed: svc !== 'missing' || existsSync(exe),
       running: svc === 'running',
       firewall: hasProgram(fw.stdout, this.programPath),
       gamepadDriver: vigem !== 'missing',
       sunshineRunning: sunshine === 'running',
-      serviceControl: svc !== 'missing' && manual && sd.stdout.includes(SERVICE_ACE)
+      serviceControl: svc !== 'missing' && manual && sd.stdout.includes(SERVICE_ACE),
+      version
     }
   }
 

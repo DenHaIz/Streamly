@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Gamepad2, Hand, Headphones, Keyboard, Lock, Mouse, RotateCw, TriangleAlert, Volume1, Volume2, VolumeX, Wand2 } from 'lucide-react'
+import { Activity, Eye, EyeOff, Gamepad2, Hand, Headphones, Keyboard, Lock, Mouse, RotateCw, TriangleAlert, Volume1, Volume2, VolumeX, Wand2 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NO_INPUT, type InputPerms } from '@shared/perms'
@@ -8,7 +8,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
-import { Button, Segmented, Slider, spring, Switch } from '@/components/ui'
+import { Button, Collapse, Segmented, Slider, spring, Switch } from '@/components/ui'
 
 /**
  * Управление трансляцией у игрока: громкость, Discord хоста, свой ввод, качество.
@@ -191,6 +191,9 @@ function GamepadRow() {
   useEffect(() => {
     if (!restarting) setBusy(false)
   }, [restarting])
+  const [showPads, setShowPads] = useState(false)
+  const pads = useApp((s) => s.client.pads)
+  const identify = useApp((s) => s.client.padIdentify)
   const reset = (): void => {
     setBusy(true)
     void api()
@@ -207,10 +210,45 @@ function GamepadRow() {
           <div className="sc-title">{t('stream.gamepadTitle')}</div>
           <div className="sc-hint">{allowed ? t('stream.gamepadHint') : t('stream.gamepadOff')}</div>
         </div>
+        {/* Глаз: номера геймпадов у хоста (кто первый игрок, кто второй). */}
+        <button
+          className={`btn btn-ghost icon-btn pad-eye ${showPads ? 'active' : ''}`}
+          onClick={() => setShowPads(!showPads)}
+          title={t('stream.padsTitle')}
+          aria-label={t('stream.padsTitle')}
+          aria-expanded={showPads}
+        >
+          {showPads ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
         <Button size="sm" icon={<RotateCw size={14} />} loading={busy && restarting} disabled={busy || !allowed} onClick={reset}>
           {t('stream.gamepadReset')}
         </Button>
       </div>
+      <Collapse open={showPads}>
+        <div className="pads-panel">
+          <div className="sc-hint">{t('stream.padsHint')}</div>
+          {pads?.length ? (
+            <ul className="pads-list">
+              {pads.map((p, i) => (
+                <li key={`${p.nickname}-${p.slot ?? 0}-${i}`} className={p.you ? 'you' : ''}>
+                  <span className={`pad-num ${p.slot ? '' : 'none'}`}>{p.slot ?? '—'}</span>
+                  <span className="pad-name">{p.you ? t('stream.padsYou', { name: p.nickname }) : p.nickname}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="sc-hint">{t('stream.padsUnknown')}</div>
+          )}
+          <div className="sc-apply">
+            <span className={`sc-hint ${identify === 'notFound' ? 'warn' : identify === 'done' ? 'ok' : ''}`}>
+              {identify === 'waiting' ? t('stream.identifyWaiting') : identify === 'notFound' ? t('stream.identifyNotFound') : identify === 'done' ? t('stream.identifyDone') : t('stream.identifyHint')}
+            </span>
+            <Button size="sm" icon={<Gamepad2 size={14} />} loading={identify === 'waiting'} disabled={!allowed || identify === 'waiting'} onClick={() => void api().client.identifyPad()}>
+              {t('stream.identify')}
+            </Button>
+          </div>
+        </div>
+      </Collapse>
       <div className="sc-row inner">
         <span className="sc-icon" />
         <div className="sc-main">
@@ -297,14 +335,16 @@ function NetworkWarning() {
   const poor = useApp((s) => s.client.poorNetwork)
   const jitter = useApp((s) => s.client.jitterMs)
   const rtt = useApp((s) => s.client.rttMs)
-  const reconnecting = useApp((s) => s.client.reconnecting)
+  const reconnecting = useApp((s) => !!s.client.reconnecting || !!s.client.signalLost)
+  const signalLost = useApp((s) => !!s.client.signalLost)
   const autoLowered = useApp((s) => s.client.autoLowered)
   const auto = useApp((s) => s.settings!.stream.autoQuality)
   const { address, quality } = useHostQuality()
   const unstable = (jitter ?? 0) >= 25 || (rtt ?? 0) >= 120
   const economy = currentPreset(quality) === 'economy'
   let text: string | null = null
-  if (reconnecting) text = t('stream.reconnecting')
+  if (signalLost) text = t('stream.signalLost')
+  else if (reconnecting) text = t('stream.reconnecting')
   else if (poor) text = auto ? t('stream.poorNetworkAuto') : t('stream.poorNetwork')
   else if (unstable) text = t('stream.unstable', { jitter: jitter ?? 0, rtt: rtt ?? 0 })
   else if (autoLowered) text = t('stream.autoLowered')

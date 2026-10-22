@@ -71,6 +71,11 @@ const streamingDemo: ClientState = {
   wifi: params.get('poor') === '1',
   relaySuspect: params.get('poor') === '1',
   active: { width: 2560, height: 1440, fps: 60, bitrateKbps: 20000, auto: false },
+  pads: [
+    { nickname: 'Алексей', slot: 2, you: true },
+    { nickname: 'Петя', slot: null, you: false }
+  ],
+  signalLost: params.get('signal') === '0',
   startedAt: Date.now() - 754_000,
   policy: { hostAudio: false, maxBitrateKbps: 20000, hostWidth: 2560, hostHeight: 1440, hostFps: 165, encoder: { vendor: 'nvenc', hevc: true, av1: true } }
 }
@@ -107,7 +112,9 @@ const bridge: StreamlyBridge = {
       ...settings,
       ...(patch as Partial<Settings>),
       stream: { ...settings.stream, ...(patch.stream ?? {}) },
-      host: { ...settings.host, ...(patch.host ?? {}), defaultPerms: { ...settings.host.defaultPerms, ...(patch.host?.defaultPerms ?? {}) } }
+      host: { ...settings.host, ...(patch.host ?? {}), defaultPerms: { ...settings.host.defaultPerms, ...(patch.host?.defaultPerms ?? {}) } },
+      hotkeys: { ...settings.hotkeys, ...(patch.hotkeys ?? {}) },
+      updates: { ...settings.updates, ...(patch.updates ?? {}) }
     } as Settings
     setHost({ maxPlayers: settings.host.maxPlayers })
     emit('settings', settings)
@@ -121,6 +128,13 @@ const bridge: StreamlyBridge = {
   openLogs: async () => undefined,
   copyDiagnostics: async () => void navigator.clipboard?.writeText('Streamly diagnostics (mock)').catch(() => undefined),
   // ?invite=1 — показать приглашение при запуске.
+  getHotkeys: async () => ({ clientMenu: 'idle', clientMenuAlt: 'idle', hostMenu: 'ok', hostPause: 'ok', hostAllow: 'idle', hostDeny: params.get('taken') === '1' ? 'taken' : 'idle' }),
+  logError: async (text) => console.warn('[ui error]', text),
+  suspendHotkeys: async () => undefined,
+  async exportLogs() {
+    await wait(600)
+    return 'C:\\Users\\demo\\Desktop\\streamly-logs.zip'
+  },
   checkInvite: async () => (params.get('invite') === '1' && !inviteShown ? ((inviteShown = true), { address: '26.51.7.12', name: 'Дима', code: 'demo-invite-code' }) : null),
   update: {
     getState: async () => update,
@@ -187,6 +201,8 @@ const bridge: StreamlyBridge = {
             muteChat: host.players.length % 2 === 0,
             poorNetwork: host.players.length === 2,
             viaInvite: host.players.length === 0,
+            // У хоста свой геймпад — первый, у игроков номера со второго.
+            padSlot: host.players.length < 2 ? host.players.length + 2 : undefined,
             // Третий игрок просит геймпад: у хоста карточка с «Выдать» и «Отказать».
             inputRequest: host.players.length === 2 ? { keyboard: false, mouse: false, gamepad: true } : undefined
           }
@@ -252,7 +268,19 @@ const bridge: StreamlyBridge = {
     async setInputPaused(paused) {
       setHost({ inputPaused: paused })
     },
-    resetGamepad: async () => undefined
+    resetGamepad: async () => undefined,
+    async passControl(id) {
+      setHost({ players: host.players.map((p) => ({ ...p, perms: p.deviceId === id ? { keyboard: true, mouse: true, gamepad: true } : { ...NO_INPUT } })) })
+    },
+    async setSpectator(id, on) {
+      setHost({ players: host.players.map((p) => (p.deviceId === id ? { ...p, perms: on ? { ...NO_INPUT } : { ...settings.host.defaultPerms } } : p)) })
+    },
+    async makePadFirst(id) {
+      const order = [id, ...host.players.filter((p) => p.deviceId !== id && p.padSlot).map((p) => p.deviceId)]
+      setHost({ players: host.players.map((p) => (order.includes(p.deviceId) ? { ...p, padSlot: order.indexOf(p.deviceId) + 2 } : p)) })
+    },
+    closeMenu: async () => undefined,
+    notifyResize: async () => undefined
   },
   client: {
     getState: async () => client,
@@ -326,6 +354,11 @@ const bridge: StreamlyBridge = {
     },
     resetGamepad() {
       return bridge.client.restartStream()
+    },
+    async identifyPad() {
+      setClient({ padIdentify: 'waiting' })
+      await wait(2000)
+      setClient({ padIdentify: 'done', pads: (client.pads ?? []).map((p) => (p.you ? { ...p, slot: 3 } : p)) })
     }
   },
   overlay: {
@@ -349,3 +382,9 @@ window.streamly = bridge
 
 // В браузере меню Alt+F2 открыто сразу.
 if (location.hash === '#overlay') setTimeout(() => emit('overlay', { open: true, screens: 2 }), 50)
+
+// Окна хоста поверх игры: хост сразу запущен (запросы появятся сами), меню открыто.
+if (location.hash === '#hostmenu' || location.hash === '#hostnotify') {
+  void bridge.host.start()
+  if (location.hash === '#hostmenu') setTimeout(() => emit('hostMenu', { open: true }), 50)
+}

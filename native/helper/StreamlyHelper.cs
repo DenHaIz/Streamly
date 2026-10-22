@@ -142,6 +142,16 @@ namespace Streamly
                         Thread.Sleep(120);
                         return Native.SendCombo(Strings(c, "keys"));
                     }
+                case "xinput":
+                    // Геймпады XInput на этом ПК (у хоста — в том числе виртуальные геймпады игроков): номер слота,
+                    // подключён ли и нажато ли сейчас что-нибудь (для «какой геймпад мой»).
+                    return Native.XInputSlots();
+                case "hung":
+                    {
+                        // Окно процесса не отвечает (Windows считает окно зависшим через 5 с без обработки сообщений).
+                        // Видимость не проверяем: зависшее окно Windows прячет за «призраком».
+                        return Native.AnyHungWindow(Int(c, "pid"));
+                    }
                 case "router":
                     router.Configure(Bool(c, "enabled"), Bool(c, "monitor"), Bool(c, "excludeChat"), Strings(c, "chatApps"), Strings(c, "virtualNames"));
                     return router.Snapshot();
@@ -1128,6 +1138,63 @@ namespace Streamly
         [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+        [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct XINPUT_STATE
+        {
+            public uint dwPacketNumber;
+            public ushort wButtons;
+            public byte bLeftTrigger;
+            public byte bRightTrigger;
+            public short sThumbLX, sThumbLY, sThumbRX, sThumbRY;
+        }
+
+        [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")] static extern uint XInputGetState14(uint index, out XINPUT_STATE state);
+        [DllImport("xinput9_1_0.dll", EntryPoint = "XInputGetState")] static extern uint XInputGetState910(uint index, out XINPUT_STATE state);
+        static bool? xinput14;
+
+        static uint GetState(uint i, out XINPUT_STATE st)
+        {
+            if (xinput14 != false)
+            {
+                try
+                {
+                    uint r = XInputGetState14(i, out st);
+                    xinput14 = true;
+                    return r;
+                }
+                catch (DllNotFoundException)
+                {
+                    xinput14 = false;
+                }
+            }
+            return XInputGetState910(i, out st);
+        }
+
+        static bool Moved(short v)
+        {
+            return v > 16000 || v < -16000;
+        }
+
+        /** Четыре слота XInput: подключён ли геймпад, номер пакета и нажато ли что-нибудь. */
+        public static List<object> XInputSlots()
+        {
+            var list = new List<object>();
+            for (uint i = 0; i < 4; i++)
+            {
+                XINPUT_STATE st;
+                bool on = GetState(i, out st) == 0;
+                bool active = on && (st.wButtons != 0 || st.bLeftTrigger > 60 || st.bRightTrigger > 60 || Moved(st.sThumbLX) || Moved(st.sThumbLY) || Moved(st.sThumbRX) || Moved(st.sThumbRY));
+                var d = new Dictionary<string, object>();
+                d["index"] = (int)i;
+                d["connected"] = on;
+                d["packet"] = on ? (double)st.dwPacketNumber : 0.0;
+                d["active"] = active;
+                list.Add(d);
+            }
+            return list;
+        }
 
         public static void MakeDpiAware()
         {
@@ -1163,6 +1230,24 @@ namespace Streamly
                 return true;
             }, IntPtr.Zero);
             return best;
+        }
+
+        /** Есть ли у процесса окно, которое Windows считает зависшим (видимое или нет). */
+        public static bool AnyHungWindow(int pid)
+        {
+            bool hung = false;
+            EnumWindows(delegate(IntPtr h, IntPtr l)
+            {
+                uint p;
+                GetWindowThreadProcessId(h, out p);
+                if (p == (uint)pid && IsHungAppWindow(h))
+                {
+                    hung = true;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return hung;
         }
 
         public static int ProcessOf(IntPtr h)

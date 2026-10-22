@@ -96,6 +96,8 @@ export interface HostSettings {
   inviteAutoAdmit: boolean
   /** Звук при запросе на подключение или просьбе об управлении. */
   requestSound: boolean
+  /** Плашка с запросами поверх игры, пока окно Streamly не на экране. */
+  gameNotify: boolean
 }
 
 /** Условия трансляции, которые хост сообщает игроку при допуске. */
@@ -170,6 +172,36 @@ export interface Settings {
   updates: UpdateSettings
   /** Показывать редко нужные настройки. */
   showAdvanced: boolean
+  hotkeys: HotkeySettings
+}
+
+/** Горячие клавиши (формат Electron: «Alt+F2», «Ctrl+Shift+F2»; пусто — выключена). */
+export interface HotkeySettings {
+  /** Меню игрока (Alt+F2). */
+  clientMenu: string
+  /** Запасное сочетание меню игрока: когда Moonlight перехватывает Alt. */
+  clientMenuAlt: string
+  /** Меню хоста поверх игры. */
+  hostMenu: string
+  /** Забрать управление у всех и вернуть. */
+  hostPause: string
+  /** Разрешить первый запрос (или выдать управление). */
+  hostAllow: string
+  /** Отклонить первый запрос. */
+  hostDeny: string
+}
+
+export type HotkeyName = keyof HotkeySettings
+/** ok — работает, taken — занято другой программой, off — выключено, idle — понадобится позже (не хостинг или не игра). */
+export type HotkeyStatus = 'ok' | 'taken' | 'off' | 'idle'
+
+export const DEFAULT_HOTKEYS: HotkeySettings = {
+  clientMenu: 'Alt+F2',
+  clientMenuAlt: 'Ctrl+Shift+F2',
+  hostMenu: 'Alt+F3',
+  hostPause: 'Alt+F12',
+  hostAllow: 'Alt+F6',
+  hostDeny: 'Alt+F7'
 }
 
 export interface UpdateSettings {
@@ -257,12 +289,14 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     notifyRequests: true,
     autoStartHosting: false,
     inviteAutoAdmit: true,
-    requestSound: true
+    requestSound: true,
+    gameNotify: true
   },
   recentHosts: [],
   hostQuality: {},
   updates: { auto: true, skipped: '' },
-  showAdvanced: false
+  showAdvanced: false,
+  hotkeys: { ...DEFAULT_HOTKEYS }
 }
 
 export interface RadminStatus {
@@ -310,7 +344,8 @@ export type HostPhase =
   | 'running'
   | 'error'
 
-export type PlayerStatus = 'waiting' | 'pairing' | 'connecting' | 'streaming'
+/** reconnecting — сигнальное соединение оборвалось, место держится, пока игрок не вернётся (или не выйдет срок). */
+export type PlayerStatus = 'waiting' | 'pairing' | 'connecting' | 'streaming' | 'reconnecting'
 
 export interface PlayerView {
   deviceId: string
@@ -332,6 +367,17 @@ export interface PlayerView {
   inputRequest?: InputPerms
   /** Вошёл по ссылке-приглашению. */
   viaInvite: boolean
+  /** Номер геймпада игрока у хоста (1–4, по XInput), если удалось определить. */
+  padSlot?: number
+}
+
+/** Номер геймпада одного игрока (для игроков: кто каким геймпадом управляет у хоста). */
+export interface PadInfo {
+  nickname: string
+  /** 1–4; null — не определён (нет геймпада или ещё не нажимали). */
+  slot: number | null
+  /** Это вы. */
+  you: boolean
 }
 
 export interface JoinRequestView {
@@ -427,6 +473,14 @@ export interface ClientState {
   inputRequest?: 'pending' | 'denied'
   /** Хост временно забрал ввод у всех. */
   inputPaused?: boolean
+  /** Номера геймпадов у хоста (кнопка-глаз в меню игрока). */
+  pads?: PadInfo[]
+  /** «Какой геймпад мой»: ждём нажатия или результат. */
+  padIdentify?: 'waiting' | 'done' | 'notFound'
+  /** Сигнальное соединение с хостом оборвалось, трансляция идёт, Streamly переподключается. */
+  signalLost?: boolean
+  /** Хост снизил потолок битрейта (пришли новые игроки): трансляция перезапущена с меньшим битрейтом. */
+  capLowered?: number
 }
 
 /** Ссылка-приглашение streamly://join/... */

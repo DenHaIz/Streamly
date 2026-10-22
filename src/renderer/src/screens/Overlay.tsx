@@ -22,6 +22,8 @@ export function Overlay() {
   const hostName = useApp((s) => s.client.host?.name)
   const startedAt = useApp((s) => s.client.startedAt)
   const rttMs = useApp((s) => s.client.rttMs)
+  const menuKey = useApp((s) => s.settings!.hotkeys.clientMenu || s.settings!.hotkeys.clientMenuAlt)
+  const keys = useApp((s) => [s.settings!.hotkeys.clientMenu, s.settings!.hotkeys.clientMenuAlt].filter(Boolean).join(', '))
   const [confirmLeave, setConfirmLeave] = useState(false)
   const leaveTimer = useRef<number | undefined>(undefined)
 
@@ -78,7 +80,7 @@ export function Overlay() {
                     {rttMs !== undefined && <RttBadge ms={rttMs} />}
                   </div>
                 </div>
-                <kbd className="kbd">Alt+F2</kbd>
+                {menuKey && <kbd className="kbd">{menuKey}</kbd>}
               </header>
 
               <StreamStats withMoonlight />
@@ -97,7 +99,7 @@ export function Overlay() {
                   {confirmLeave ? t('overlay.leaveConfirm') : t('connect.disconnect')}
                 </Button>
               </footer>
-              <div className="overlay-tip">{t('overlay.tip')}</div>
+              <div className="overlay-tip">{t('overlay.tip', { keys: keys || '—' })}</div>
             </motion.div>
           </motion.div>
         )}

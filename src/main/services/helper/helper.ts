@@ -61,6 +61,14 @@ interface Pending {
  * Запускается при первом обращении, при падении перезапускается (не чаще раза в 5 с).
  * Если помощника нет (сборка без него), вызовы завершаются ошибкой, а приложение работает без этих функций.
  */
+/** Слот геймпада XInput (0–3). active — сейчас нажата кнопка, курок или отклонён стик. */
+export interface XInputSlot {
+  index: number
+  connected: boolean
+  packet: number
+  active: boolean
+}
+
 export class Helper extends EventEmitter {
   private proc: ChildProcess | null = null
   private seq = 0
@@ -184,6 +192,16 @@ export class Helper extends EventEmitter {
 
   netInfo(): Promise<NetAdapter[]> {
     return this.call<NetAdapter[]>('netInfo')
+  }
+
+  /** Слоты XInput этого ПК (у хоста — и виртуальные геймпады игроков). */
+  xinput(): Promise<XInputSlot[]> {
+    return this.call<XInputSlot[]>('xinput', {}, 2000)
+  }
+
+  /** Окно процесса не отвечает (Windows считает его зависшим). */
+  hung(pid: number): Promise<boolean> {
+    return this.call<boolean>('hung', { pid }, 3000)
   }
 
   /** Активирует окно процесса и нажимает сочетание клавиш (например, ['ctrl', 'alt', 'shift', 's']). */

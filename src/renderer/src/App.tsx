@@ -77,7 +77,7 @@ function TitleBar() {
   )
 }
 
-function Toasts() {
+export function Toasts() {
   const { t: tr } = useTranslation()
   const toasts = useApp((s) => s.toasts)
   const dismiss = useApp((s) => s.dismissToast)
@@ -132,6 +132,8 @@ function useGlobalNotifications(): void {
   const players = useApp((s) => s.host?.players)
   const inputRequest = useApp((s) => s.client.inputRequest)
   const inputPaused = useApp((s) => s.client.inputPaused)
+  const capLowered = useApp((s) => s.client.capLowered)
+  const signalLost = useApp((s) => s.client.signalLost)
   const seenInput = useRef(new Set<string>())
   const prevInputRequest = useRef<string | undefined>(undefined)
   const perms = useApp((s) => s.client.perms)
@@ -165,6 +167,21 @@ function useGlobalNotifications(): void {
     prevInputRequest.current = inputRequest
     if (prev === 'pending' && inputRequest === 'denied') useApp.getState().toast({ tone: 'warning', text: t('stream.requestDenied') })
   }, [inputRequest, t])
+
+  // Хост перераспределил канал между игроками: трансляция перезапущена с меньшим битрейтом.
+  const prevCap = useRef(capLowered)
+  useEffect(() => {
+    const was = prevCap.current
+    prevCap.current = capLowered
+    if (capLowered && capLowered !== was) useApp.getState().toast({ tone: 'info', text: t('stream.capLowered', { mbps: Math.round(capLowered / 1000) }) })
+  }, [capLowered, t])
+
+  const prevSignal = useRef(false)
+  useEffect(() => {
+    const was = prevSignal.current
+    prevSignal.current = !!signalLost
+    if (was && !signalLost) useApp.getState().toast({ tone: 'success', text: t('stream.signalBack') })
+  }, [signalLost, t])
 
   const prevPaused = useRef(false)
   useEffect(() => {

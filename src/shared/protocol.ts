@@ -11,7 +11,8 @@ export const DISCOVERY_REPLY = 'STREAMLY_HOST_V1'
 export const APOLLO_APP = 'Desktop'
 
 export type ClientMessage =
-  | { t: 'hello'; v: number; deviceId: string; nickname: string; appVersion: string; trustToken?: string; inviteCode?: string }
+  /** resumeToken — возвращение после короткого обрыва: хост пускает без подтверждения, пока держит место. */
+  | { t: 'hello'; v: number; deviceId: string; nickname: string; appVersion: string; trustToken?: string; inviteCode?: string; resumeToken?: string }
   | { t: 'joinRequest' }
   | { t: 'pairRequest' }
   | { t: 'pairSpawned' }
@@ -29,11 +30,15 @@ export type ClientMessage =
   | { t: 'inputRequest'; perms: InputPerms }
   /** Замер скорости: хост присылает двоичные данные и затем speedEnd. */
   | { t: 'speedTest' }
+  /** «Какой геймпад мой»: хост ждёт нажатия на геймпаде игрока и сообщает номер. */
+  | { t: 'identifyPad' }
+  /** Игрок уходит сам (а не обрыв связи): место не держим. */
+  | { t: 'leave' }
 
 export type HostMessage =
   | { t: 'hostInfo'; v: number; hostName: string; slotsUsed: number; maxSlots: number }
   /** needsPair: хост не знает этого клиента в Apollo, нужно сопряжение (хост — источник истины). */
-  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean; policy: StreamPolicy }
+  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean; policy: StreamPolicy; resumeToken?: string }
   | { t: 'joinDenied'; reason: 'denied' | 'full' | 'version' | 'busy' }
   | { t: 'pairBegin'; pin: string }
   /** Очередь дошла: можно запускать Moonlight. */
@@ -58,6 +63,12 @@ export type HostMessage =
   | { t: 'speedEnd'; bytes: number }
   /** Хост просит переподключить геймпады (двойной или зависший геймпад): клиент быстро перезапускает трансляцию. */
   | { t: 'resetGamepad' }
+  /** Условия трансляции изменились (например, потолок битрейта при смене числа игроков). */
+  | { t: 'policyUpdate'; policy: StreamPolicy }
+  /** Номера геймпадов игроков у хоста. */
+  | { t: 'pads'; list: { nickname: string; slot: number | null; you: boolean }[] }
+  /** Ответ на identifyPad: номер геймпада (null — нажатия не было). */
+  | { t: 'padIdentified'; slot: number | null }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -81,7 +92,9 @@ const CLIENT_TYPES = new Set([
   'prefs',
   'netStatus',
   'inputRequest',
-  'speedTest'
+  'speedTest',
+  'identifyPad',
+  'leave'
 ])
 const HOST_TYPES = new Set([
   'hostInfo',
@@ -99,7 +112,10 @@ const HOST_TYPES = new Set([
   'inputRequestResult',
   'inputPaused',
   'speedEnd',
-  'resetGamepad'
+  'resetGamepad',
+  'policyUpdate',
+  'pads',
+  'padIdentified'
 ])
 
 const MAX_MESSAGE = 4096
@@ -130,6 +146,7 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
     if (typeof m.v !== 'number' || !isDeviceId(m.deviceId) || !str(m.nickname, 32) || !str(m.appVersion, 32)) return null
     if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
     if (m.inviteCode !== undefined && !(typeof m.inviteCode === 'string' && /^[\w-]{8,64}$/.test(m.inviteCode))) return null
+    if (m.resumeToken !== undefined && !(typeof m.resumeToken === 'string' && /^[\w-]{16,64}$/.test(m.resumeToken))) return null
   }
   if (m.t === 'inputRequest' && !isPerms(m.perms)) return null
   if (m.t === 'prefs' && (typeof m.muteChat !== 'boolean' || !isPerms(m.selfOff))) return null
@@ -172,6 +189,23 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
     case 'joinAccepted':
       if (!isPerms(m.perms) || !isPolicy(m.policy) || typeof m.needsPair !== 'boolean') return null
       if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
+      if (m.resumeToken !== undefined && !(typeof m.resumeToken === 'string' && /^[\w-]{16,64}$/.test(m.resumeToken))) return null
+      break
+    case 'policyUpdate':
+      if (!isPolicy(m.policy)) return null
+      break
+    case 'pads': {
+      const list = m.list
+      if (!Array.isArray(list) || list.length > 8) return null
+      for (const p of list as Record<string, unknown>[]) {
+        if (!p || typeof p !== 'object' || !str(p.nickname, 32) || typeof p.you !== 'boolean') return null
+        if (p.slot !== null && !int(p.slot, 1, 4)) return null
+        p.nickname = sanitizeNickname(p.nickname as string)
+      }
+      break
+    }
+    case 'padIdentified':
+      if (m.slot !== null && !int(m.slot, 1, 4)) return null
       break
     case 'permissionsChanged':
       if (!isPerms(m.perms)) return null

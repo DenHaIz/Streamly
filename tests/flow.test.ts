@@ -10,7 +10,7 @@ import type { ApolloClient } from '../src/main/services/apollo/api'
 import type { ApolloLike, HostDeps, InstallerLike } from '../src/main/services/host/controller'
 import type { RouterOptions, RouterState } from '../src/main/services/helper/helper'
 import { HostController } from '../src/main/services/host/controller'
-import { ClientController, type MoonlightLike } from '../src/main/services/client/controller'
+import { ClientController, type ClientDeps, type MoonlightLike } from '../src/main/services/client/controller'
 import type { MoonlightProcess } from '../src/main/services/moonlight/runner'
 import type { StreamSettings } from '@shared/types'
 import { SecretsService, SettingsService } from '../src/main/settings'
@@ -90,7 +90,7 @@ function fakeProcess(onKill?: () => void, exitCode?: number, lines: string[] = [
     done(exitCode)
   }, 5)
   return {
-    child: null as never,
+    child: { pid: 4000 + Math.floor(Math.random() * 1000) } as never,
     exited,
     kill: () => {
       if (!alive) return
@@ -226,7 +226,7 @@ function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
     ...extra
   })
 
-  const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number; appVersion?: string } = {}) => {
+  const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number; appVersion?: string; extra?: Partial<ClientDeps> } = {}) => {
     const settings = new SettingsService(tmp(), 'ru')
     settings.update({ nickname: nick })
     const moonlight = new FakeMoonlight(apollo)
@@ -234,13 +234,14 @@ function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
       settings,
       secrets: new SecretsService(tmp()),
       moonlight,
-      appVersion: opts.appVersion ?? 'test',
+      appVersion: opts.appVersion ?? '0.5.0',
       probe: async () => [],
       neighbors: async () => [],
       signalingPort: port,
       pairSettleMs: 10,
       streamStartTimeoutMs: opts.streamStartTimeoutMs,
-      moonlightLog: () => 'moonlight log tail'
+      moonlightLog: () => 'moonlight log tail',
+      ...opts.extra
     })
     return { client, settings, moonlight }
   }
@@ -760,5 +761,169 @@ describe('host ↔ client flow', () => {
     await client.connect('127.0.0.1')
     await waitFor(() => client.getState().phase === 'error')
     expect(client.getState().error).toBe('host_not_hosting')
+  }, 15000)
+
+  /** Сокет игрока на стороне хоста (имитация обрыва связи). */
+  const hostSocketOf = (host: HostController, nickname: string): { terminate(): void } =>
+    [...(host as unknown as { peers: Map<string, { ws: { terminate(): void }; nickname: string; admitted: boolean }> }).peers.values()].find((p) => p.nickname === nickname && p.admitted)!.ws
+
+  async function joined(host: HostController, client: ClientController, how: 'allow' | 'trust' | 'spectate' = 'allow'): Promise<void> {
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, how)
+    await waitFor(() => client.getState().phase === 'streaming')
+  }
+
+  it('a short signaling drop: the game keeps going and the player comes back without approval', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    const uuid = moonlight.uuid
+    let sawLost = false
+    client.on('state', (st) => (sawLost ||= st.signalLost === true))
+    hostSocketOf(host, 'Вася').terminate()
+    // Хост держит место, права в Apollo не снимаются.
+    await waitFor(() => sawLost)
+    expect(apollo.clients.find((c) => c.uuid === uuid)!.perm).not.toBe(0)
+    await waitFor(() => client.getState().signalLost === false && host.getState().players[0]?.status === 'streaming', 8000)
+    expect(host.getState().requests).toHaveLength(0)
+    expect(moonlight.streams).toBe(1)
+    expect(client.getState().phase).toBe('streaming')
+  }, 20000)
+
+  it('the held place is released if the player does not come back', async () => {
+    const { apollo, host, makeClient } = setup(4, { resumeGraceMs: 300 })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася', { extra: { resumeWindowMs: 100 } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    // Клиент не сможет вернуться: токен потерян.
+    ;(client as unknown as { resume: null }).resume = null
+    hostSocketOf(host, 'Вася').terminate()
+    await waitFor(() => host.getState().players.length === 0, 5000)
+    await waitFor(() => apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm === 0)
+  }, 15000)
+
+  it('lets a friend in as a spectator and passes control between players', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const a = makeClient('Вася')
+    cleanups.push(() => a.client.cancel())
+    await joined(host, a.client, 'spectate')
+    const permA = (): number => apollo.clients.find((c) => c.uuid === a.moonlight.uuid)!.perm
+    expect(permA() & (PERM.inputKbd | PERM.inputMouse | PERM.inputController)).toBe(0)
+    expect(a.client.getState().perms).toEqual({ keyboard: false, mouse: false, gamepad: false })
+
+    const b = makeClient('Петя')
+    cleanups.push(() => b.client.cancel())
+    await joined(host, b.client)
+    const permB = (): number => apollo.clients.find((c) => c.uuid === b.moonlight.uuid)!.perm
+    const vasya = host.getState().players.find((p) => p.nickname === 'Вася')!
+    await host.passControl(vasya.deviceId)
+    const input = PERM.inputKbd | PERM.inputMouse | PERM.inputController
+    expect(permA() & input).toBe(input)
+    expect(permB() & input).toBe(0)
+    await waitFor(() => b.client.getState().perms?.gamepad === false && a.client.getState().perms?.gamepad === true)
+    // Зритель обратно: права по умолчанию.
+    const petya = host.getState().players.find((p) => p.nickname === 'Петя')!
+    await host.setSpectator(petya.deviceId, false)
+    expect(permB() & input).toBe(input)
+  }, 15000)
+
+  it('rebalances the bitrate cap when more players join', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const players = ['Вася', 'Петя', 'Коля'].map((n) => makeClient(n))
+    for (const p of players) {
+      // Битрейт выше любого потолка: действует потолок хоста.
+      p.settings.update({ stream: { bitrateKbps: 50000 } })
+      cleanups.push(() => p.client.cancel())
+    }
+    await joined(host, players[0].client)
+    await joined(host, players[1].client)
+    expect(players[0].client.getState().active?.bitrateKbps).toBe(30000)
+    await joined(host, players[2].client)
+    // Третий игрок: потолок 20 Мбит/с, первые двое перезапускаются с меньшим битрейтом.
+    await waitFor(() => players[0].client.getState().capLowered === 20000 && players[1].client.getState().capLowered === 20000)
+    await waitFor(() => players[0].client.getState().active?.bitrateKbps === 20000 && players[0].client.getState().phase === 'streaming', 8000)
+    expect(players[0].moonlight.streams).toBe(2)
+    expect(players[2].moonlight.streams).toBe(1)
+  }, 25000)
+
+  it('tells players their gamepad numbers and finds a gamepad by a button press', async () => {
+    const slots = [
+      { index: 0, connected: true, active: false },
+      { index: 1, connected: false, active: false },
+      { index: 2, connected: false, active: false },
+      { index: 3, connected: false, active: false }
+    ]
+    const { host, makeClient } = setup(4, { xinput: async () => slots.map((x) => ({ ...x })) })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    // Apollo создал виртуальный геймпад игрока во втором слоте (первый — свой у хоста).
+    slots[1].connected = true
+    await waitFor(() => host.getState().players[0]?.padSlot === 2)
+    await waitFor(() => client.getState().pads?.find((p) => p.you)?.slot === 2)
+
+    client.identifyPad()
+    expect(client.getState().padIdentify).toBe('waiting')
+    slots[2].connected = true
+    await new Promise((r) => setTimeout(r, 300))
+    slots[2].active = true
+    await waitFor(() => client.getState().padIdentify === 'done')
+    await waitFor(() => host.getState().players[0]?.padSlot === 3)
+  }, 15000)
+
+  it('restarts a stream whose Moonlight window stopped responding', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    let hung = false
+    const { client, moonlight } = makeClient('Вася', { extra: { isHung: async () => hung, hungCheckMs: 40 } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    hung = true
+    await waitFor(() => moonlight.streams === 2)
+    hung = false
+    await waitFor(() => client.getState().phase === 'streaming' && !client.getState().reconnecting)
+  }, 15000)
+
+  it('measures the channel gently while someone else is playing', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const a = makeClient('Вася')
+    cleanups.push(() => a.client.cancel())
+    await joined(host, a.client)
+    const b = makeClient('Петя')
+    b.settings.update({ stream: { autoQuality: true } })
+    cleanups.push(() => b.client.cancel())
+    await joined(host, b.client)
+    expect(b.client.getState().speedMbps).toBeGreaterThan(0)
+  }, 15000)
+
+  it('kicking everyone also releases a place held after a drop', async () => {
+    const { apollo, host, makeClient } = setup(4, { resumeGraceMs: 10_000 })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася', { extra: { resumeWindowMs: 100 } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    ;(client as unknown as { resume: null }).resume = null
+    hostSocketOf(host, 'Вася').terminate()
+    await waitFor(() => host.getState().players[0]?.status === 'reconnecting')
+    expect(apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm).not.toBe(0)
+    await host.kickAll()
+    expect(host.getState().players).toHaveLength(0)
+    expect(apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm).toBe(0)
   }, 15000)
 })

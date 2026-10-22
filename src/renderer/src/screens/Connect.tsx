@@ -245,6 +245,7 @@ function useElapsed(since?: number): string {
 function Streaming({ client }: { client: ClientState }) {
   const { t } = useTranslation()
   const elapsed = useElapsed(client.startedAt)
+  const menuKey = useApp((s) => s.settings!.hotkeys.clientMenu || s.settings!.hotkeys.clientMenuAlt)
   return (
     <motion.div className="card card-pad center-card stream-card" {...fade}>
       <motion.div className="setup-orb success" initial={{ scale: 0.5, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: 'spring', stiffness: 260, damping: 14 }}>
@@ -262,7 +263,7 @@ function Streaming({ client }: { client: ClientState }) {
         {!!client.policy?.maxBitrateKbps && <span className="pill">{t('connect.bitrateCap', { mbps: Math.round(client.policy.maxBitrateKbps / 1000) })}</span>}
       </div>
       <div className="kbd-hint">
-        <kbd className="kbd">Alt+F2</kbd>
+        <kbd className="kbd">{menuKey || '—'}</kbd>
         <span>{t('connect.overlayHint')}</span>
       </div>
       <StreamStats withMoonlight />

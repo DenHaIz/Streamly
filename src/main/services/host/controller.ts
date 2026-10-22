@@ -105,6 +105,12 @@ export interface HostDeps {
   inviteTtlMs?: number
   /** Названия видеокарт ПК (для проверки, что видео кодирует дискретная, а не встроенная). */
   gpus?: () => Promise<string[]>
+  /** Слоты геймпадов XInput на хосте (номера геймпадов игроков). */
+  xinput?: () => Promise<{ index: number; connected: boolean; active: boolean }[] | null>
+  /** Сколько держать место игрока после обрыва сигнального соединения. */
+  resumeGraceMs?: number
+  /** Версия Apollo в комплекте Streamly (для проверки, не устарел ли установленный). */
+  bundledApolloVersion?: string
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -140,6 +146,15 @@ interface Peer {
   /** После отказа повторная просьба не раньше этого времени. */
   inputRequestBlockedUntil?: number
   lastSpeedTest?: number
+  /** Игрок сам отключился: место после закрытия соединения не держим. */
+  leaving?: boolean
+  /** Хэш токена возобновления, выданного при допуске (возвращение после короткого обрыва). */
+  resumeHash?: string
+  /** Токен возобновления из hello. */
+  resumeToken?: string
+  /** Когда Apollo начал видеть поток игрока (для номера его геймпада). */
+  streamStartedAt?: number
+  lastIdentify?: number
   /** Ограничение частоты сообщений (маркерное ведро). */
   tokens: number
   tokensAt: number
@@ -206,8 +221,26 @@ const SPEED_TEST_BYTES = 4 * 1024 * 1024
 const SPEED_CHUNK = randomBytes(64 * 1024)
 const SPEED_TEST_EVERY_MS = 20_000
 
+/** Во время чужой игры замер скромнее и порциями: уже играющие не должны получить рывок. */
+const SPEED_TEST_SHARED_BYTES = 1536 * 1024
+
 /** Остановка хоста во время асинхронной операции: дальше ничего не делаем. */
 class Cancelled extends Error {}
+
+/** Игрок, у которого оборвалось сигнальное соединение: место и права в Apollo держатся, пока он не вернётся. */
+interface Grace {
+  deviceId: string
+  nickname: string
+  address: string
+  resumeHash: string
+  since: number
+  selfOff: InputPerms
+  muteChat: boolean
+  viaInvite: boolean
+  timer: NodeJS.Timeout
+}
+
+const ALL_INPUT: InputPerms = { keyboard: true, mouse: true, gamepad: true }
 
 export class HostController extends EventEmitter {
   private phase: HostState['phase'] = 'idle'
@@ -262,6 +295,15 @@ export class HostController extends EventEmitter {
   /** Хост временно забрал ввод у всех. */
   private inputPaused = false
   private upload: { bytes: number; at: number; mbps?: number } | null = null
+  /** Игроки, ждущие возвращения после обрыва (по deviceId). */
+  private readonly graces = new Map<string, Grace>()
+  /** Чей геймпад в каком слоте XInput: deviceId, 'host' (свой геймпад хоста) или '?' (неизвестно). */
+  private readonly padOwner = new Map<number, string>()
+  private padsInit = false
+  private identifying = false
+  private readonly padsSent = new Map<string, string>()
+  /** Потолок битрейта, который игроки получили последним (перераспределение при смене числа игроков). */
+  private lastCap = 0
 
   constructor(private readonly d: HostDeps) {
     super()
@@ -295,7 +337,8 @@ export class HostController extends EventEmitter {
           muteChat: p.muteChat,
           poorNetwork: p.poorNetwork,
           inputRequest: p.inputRequest,
-          viaInvite: p.viaInvite
+          viaInvite: p.viaInvite,
+          padSlot: this.slotOf(p.deviceId)
         })
       } else if (p.requestId) {
         requests.push({
@@ -307,6 +350,23 @@ export class HostController extends EventEmitter {
           known: !!this.friend(p.deviceId)
         })
       }
+    }
+    for (const g of this.graces.values()) {
+      const f = this.friend(g.deviceId)
+      players.push({
+        deviceId: g.deviceId,
+        nickname: g.nickname,
+        address: g.address,
+        status: 'reconnecting',
+        perms: f?.perms ?? this.d.settings.get().host.defaultPerms,
+        trusted: f?.trusted ?? false,
+        since: g.since,
+        selfOff: g.selfOff,
+        muteChat: g.muteChat,
+        poorNetwork: true,
+        viaInvite: g.viaInvite,
+        padSlot: this.slotOf(g.deviceId)
+      })
     }
     players.sort((a, b) => a.since - b.since)
     return {
@@ -385,7 +445,7 @@ export class HostController extends EventEmitter {
   }
 
   private get admittedCount(): number {
-    let n = 0
+    let n = this.graces.size
     for (const p of this.peers.values()) if (p.admitted) n++
     return n
   }
@@ -618,6 +678,7 @@ export class HostController extends EventEmitter {
   onSettingsChanged(): void {
     if (this.phase !== 'running') return
     void this.updateAudio()
+    this.rebalance()
     if (this.configSig() === this.appliedConfig) {
       if (this.pendingRestart) {
         this.pendingRestart = false
@@ -831,6 +892,7 @@ export class HostController extends EventEmitter {
     const sockets = [...(this.wss?.clients ?? [])]
     const cut = setTimeout(() => sockets.forEach((s) => s.terminate()), 1000)
     this.peers.clear()
+    for (const id of [...this.graces.keys()]) this.endGrace(id)
     this.launchQueue = []
     this.activeLaunch = null
     this.discovery?.stop()
@@ -858,6 +920,10 @@ export class HostController extends EventEmitter {
     this.upload = null
     this.apolloDown = false
     this.pollFailures = 0
+    this.padOwner.clear()
+    this.padsInit = false
+    this.padsSent.clear()
+    this.lastCap = 0
     // Служба Apollo нужна только на время хостинга: после перезагрузки ПК она сама не запустится.
     if (wasActive && this.serviceControl) await this.d.installer.stopService().catch(() => false)
     this.starting = false
@@ -895,9 +961,10 @@ export class HostController extends EventEmitter {
     const uuid = this.friend(deviceId)?.apolloUuid
     if (!uuid) return
     const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
+    const selfOff = peer?.selfOff ?? this.graces.get(deviceId)?.selfOff
     try {
       if (perms && gen !== this.gen) return
-      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(perms, peer?.selfOff)) : 0)
+      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(perms, selfOff)) : 0)
       if (!perms) await this.d.apollo.disconnect(uuid)
     } catch (e) {
       this.log(`applyPerms ${deviceId}`, e)
@@ -935,6 +1002,7 @@ export class HostController extends EventEmitter {
       if (!c) continue
       const next: PlayerStatus = c.connected ? 'streaming' : p.status === 'streaming' ? 'waiting' : p.status
       if (next !== p.status) {
+        if (next === 'streaming') p.streamStartedAt = Date.now()
         // Клиент узнаёт от хоста, что стрим действительно идёт (или оборвался).
         if (next === 'streaming' || p.status === 'streaming') this.send(p, { t: 'sessionState', streaming: next === 'streaming' })
         p.status = next
@@ -943,12 +1011,22 @@ export class HostController extends EventEmitter {
       const want = toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(f.perms, p.selfOff))
       if (c.perm !== want && gen === this.gen) await this.d.apollo.setPerm(c.uuid, want).catch(() => undefined)
     }
+    // Игроки после обрыва: их поток в Apollo может идти дальше, права держим.
+    for (const g of this.graces.values()) {
+      const f = this.friend(g.deviceId)
+      if (!f?.apolloUuid) continue
+      known.add(f.apolloUuid)
+      const c = byUuid.get(f.apolloUuid)
+      const want = toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(f.perms, g.selfOff))
+      if (c && c.perm !== want && gen === this.gen) await this.d.apollo.setPerm(c.uuid, want).catch(() => undefined)
+    }
     for (const c of clients) {
       if (known.has(c.uuid)) continue
       if (c.perm !== 0) await this.d.apollo.setPerm(c.uuid, 0).catch(() => undefined)
       if (c.connected) await this.d.apollo.disconnect(c.uuid).catch(() => undefined)
     }
     this.pumpLaunches()
+    if (await this.trackPads()) changed = true
     if (await this.measureUpload()) changed = true
     if (changed) this.emitState()
     await this.idleCheck(clients.some((c) => c.connected && known.has(c.uuid)), gen)
@@ -1082,9 +1160,56 @@ export class HostController extends EventEmitter {
     this.pumpLaunches()
     if (peer.deviceId && peer.admitted) {
       const stillHere = [...this.peers.values()].some((p) => p.deviceId === peer.deviceId && p.admitted)
-      if (!stillHere) await this.applyPerms(peer.deviceId, null)
-      if (peer.muteChat) await this.updateAudio()
+      if (!stillHere && !peer.leaving && peer.resumeHash && this.phase === 'running' && !this.kicked.has(peer.deviceId)) {
+        // Короткий обрыв (Wi-Fi, Radmin): трансляция Moonlight может идти дальше. Права и место держим,
+        // игрок вернётся по токену без подтверждения.
+        this.startGrace(peer)
+      } else {
+        if (!stillHere) await this.applyPerms(peer.deviceId, null)
+        if (peer.muteChat) await this.updateAudio()
+      }
     }
+    this.rebalance()
+    this.pushPads()
+    this.emitState()
+  }
+
+  private startGrace(peer: Peer): void {
+    const deviceId = peer.deviceId!
+    this.endGrace(deviceId)
+    this.log(`${peer.nickname}: signaling lost, holding the place`)
+    const timer = setTimeout(() => void this.expireGrace(deviceId), this.d.resumeGraceMs ?? 20_000)
+    this.graces.set(deviceId, {
+      deviceId,
+      nickname: peer.nickname,
+      address: peer.address,
+      resumeHash: peer.resumeHash!,
+      since: peer.since,
+      selfOff: peer.selfOff,
+      muteChat: peer.muteChat,
+      viaInvite: peer.viaInvite,
+      timer
+    })
+  }
+
+  private endGrace(deviceId: string): Grace | undefined {
+    const g = this.graces.get(deviceId)
+    if (g) {
+      clearTimeout(g.timer)
+      this.graces.delete(deviceId)
+    }
+    return g
+  }
+
+  /** Игрок не вернулся вовремя: права снимаются, место освобождается. */
+  private async expireGrace(deviceId: string): Promise<void> {
+    const g = this.endGrace(deviceId)
+    if (!g) return
+    this.log(`${g.nickname} did not come back`)
+    if (!this.isAdmitted(deviceId)) await this.applyPerms(deviceId, null)
+    if (g.muteChat) await this.updateAudio()
+    this.rebalance()
+    this.pushPads()
     this.emitState()
   }
 
@@ -1107,6 +1232,7 @@ export class HostController extends EventEmitter {
       peer.nickname = sanitizeNickname(msg.nickname)
       peer.appVersion = msg.appVersion
       peer.trustToken = msg.trustToken
+      peer.resumeToken = msg.resumeToken
       peer.inviteCode = msg.inviteCode
       return this.send(peer, {
         t: 'hostInfo',
@@ -1122,6 +1248,21 @@ export class HostController extends EventEmitter {
       case 'joinRequest': {
         if (peer.admitted || peer.requestId) return
         const deviceId = peer.deviceId
+        const kicked = this.kicked.has(deviceId) || this.kicked.has(`a:${peer.address}`)
+        // Возвращение после короткого обрыва: место ещё держится (или хост ещё не заметил обрыва старого
+        // соединения), токен совпал — без подтверждения и без разрыва идущей трансляции в Apollo.
+        const tokenHash = peer.resumeToken ? sha256(peer.resumeToken) : undefined
+        const g = this.graces.get(deviceId)
+        const old = [...this.peers.values()].find((p) => p !== peer && p.admitted && p.deviceId === deviceId && p.resumeHash)
+        const from = g && g.resumeHash === tokenHash ? g : old && old.resumeHash === tokenHash ? old : undefined
+        if (!kicked && tokenHash && from) {
+          if (g) this.endGrace(deviceId)
+          peer.selfOff = from.selfOff
+          peer.muteChat = from.muteChat
+          peer.viaInvite = from.viaInvite
+          this.log(`${peer.nickname} is back after a short drop`)
+          return this.admit(peer, false, undefined, true)
+        }
         if (this.isDenied(peer)) {
           this.send(peer, { t: 'joinDenied', reason: 'denied' })
           return void peer.ws.close()
@@ -1130,7 +1271,6 @@ export class HostController extends EventEmitter {
           return this.send(peer, { t: 'joinDenied', reason: 'full' })
         }
         const f = this.friend(deviceId)
-        const kicked = this.kicked.has(deviceId) || this.kicked.has(`a:${peer.address}`)
         if (!kicked && f?.trusted && f.tokenHash && peer.trustToken && sha256(peer.trustToken) === f.tokenHash) {
           return this.admit(peer, false)
         }
@@ -1220,13 +1360,34 @@ export class HostController extends EventEmitter {
       case 'speedTest': {
         if (!peer.admitted || Date.now() - (peer.lastSpeedTest ?? 0) < SPEED_TEST_EVERY_MS) return this.send(peer, { t: 'speedEnd', bytes: 0 })
         peer.lastSpeedTest = Date.now()
-        // Без сжатия и подряд: клиент считает скорость по времени прихода кусков.
-        for (let sent = 0; sent < SPEED_TEST_BYTES; sent += SPEED_CHUNK.length) {
+        const shared = this.graces.size > 0 || [...this.peers.values()].some((p) => p !== peer && p.admitted && p.status === 'streaming')
+        if (!shared) {
+          // Без сжатия и подряд: клиент считает скорость по времени прихода кусков.
+          for (let sent = 0; sent < SPEED_TEST_BYTES; sent += SPEED_CHUNK.length) {
+            if (peer.ws.readyState !== peer.ws.OPEN) return
+            peer.ws.send(SPEED_CHUNK, { binary: true })
+          }
+          return this.send(peer, { t: 'speedEnd', bytes: SPEED_TEST_BYTES })
+        }
+        // Кто-то уже играет: меньше данных и порциями с паузами, чтобы его трансляция не дёрнулась.
+        // Замер выйдет скромнее настоящего канала — для автоподбора это безопасная сторона.
+        // send только ставит данные в очередь: следующую порцию — когда предыдущая ушла в сеть.
+        let sent = 0
+        while (sent < SPEED_TEST_SHARED_BYTES) {
           if (peer.ws.readyState !== peer.ws.OPEN) return
           peer.ws.send(SPEED_CHUNK, { binary: true })
+          sent += SPEED_CHUNK.length
+          await sleep(4)
+          for (let i = 0; peer.ws.bufferedAmount > 32 * 1024 && i < 500; i++) await sleep(4)
         }
-        return this.send(peer, { t: 'speedEnd', bytes: SPEED_TEST_BYTES })
+        return this.send(peer, { t: 'speedEnd', bytes: sent })
       }
+      case 'leave':
+        peer.leaving = true
+        return
+      case 'identifyPad':
+        if (peer.admitted) void this.identifyPad(peer)
+        return
       case 'netStatus':
         if (peer.admitted && peer.poorNetwork !== msg.poor) {
           peer.poorNetwork = msg.poor
@@ -1274,7 +1435,7 @@ export class HostController extends EventEmitter {
   }
 
   private isAdmitted(deviceId: string): boolean {
-    return [...this.peers.values()].some((p) => p.admitted && p.deviceId === deviceId)
+    return this.graces.has(deviceId) || [...this.peers.values()].some((p) => p.admitted && p.deviceId === deviceId)
   }
 
   /** Решение хоста по запросу на подключение. */
@@ -1298,7 +1459,7 @@ export class HostController extends EventEmitter {
     }
     this.kicked.delete(peer.deviceId)
     this.kicked.delete(`a:${peer.address}`)
-    await this.admit(peer, decision === 'trust')
+    await this.admit(peer, decision === 'trust', decision === 'spectate' ? NO_INPUT : undefined)
   }
 
   /** Список клиентов Apollo с одной повторной попыткой: короткий сбой не должен превращаться в лишнее сопряжение. */
@@ -1313,9 +1474,11 @@ export class HostController extends EventEmitter {
     return null
   }
 
-  private async admit(peer: Peer, grantTrust: boolean): Promise<void> {
+  private async admit(peer: Peer, grantTrust: boolean, perms?: InputPerms, resumed = false): Promise<void> {
     const deviceId = peer.deviceId!
     const gen = this.gen
+    // Игрок вернулся (по токену, доверию, ссылке или с подтверждением): место за ним больше не держим отдельно.
+    this.endGrace(deviceId)
     // Новое соединение допущено: старое соединение этого же устройства больше не нужно.
     let replaced = false
     for (const other of [...this.peers.values()]) {
@@ -1340,6 +1503,8 @@ export class HostController extends EventEmitter {
       }
       f.nickname = peer.nickname
       f.lastSeen = Date.now()
+      // «Пустить зрителем»: без клавиатуры, мыши и геймпада.
+      if (perms) f.perms = { ...perms }
       if (grantTrust) {
         token = randomBytes(24).toString('base64url')
         f.trusted = true
@@ -1372,11 +1537,18 @@ export class HostController extends EventEmitter {
       }
       needsPair = !clients.some((c) => c.uuid === f.apolloUuid)
       // Переподключение того же устройства: старый поток в Apollo обрываем, чтобы статус не остался «в игре» от него.
-      if (replaced && !needsPair) await this.d.apollo.disconnect(f.apolloUuid).catch(() => undefined)
+      // При возвращении после обрыва трансляция та же самая — её не трогаем.
+      if (replaced && !needsPair && !resumed) await this.d.apollo.disconnect(f.apolloUuid).catch(() => undefined)
     }
     if (gen !== this.gen || !this.peers.has(peer.id)) return
     if (!needsPair) await this.applyPerms(deviceId, f.perms, gen)
-    this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy() })
+    // Токен возобновления: после короткого обрыва игрок вернётся без подтверждения (пока хост держит место).
+    // Только Streamly 0.5+: старые версии не умеют ни возвращаться, ни сообщать, что уходят сами.
+    const resumeToken = versionAtLeast(peer.appVersion, '0.5.0') ? randomBytes(18).toString('base64url') : undefined
+    peer.resumeHash = resumeToken ? sha256(resumeToken) : undefined
+    this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy(), resumeToken })
+    this.rebalance(peer)
+    this.pushPads()
     const audio = this.audioView()
     this.send(peer, { t: 'audioState', chatControl: audio.chatControl, chatExcluded: audio.chatExcluded })
     if (this.inputPaused) this.send(peer, { t: 'inputPaused', paused: true })
@@ -1490,6 +1662,7 @@ export class HostController extends EventEmitter {
       s.friends[deviceId].perms = clean
     })
     const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
+    if (!peer && this.graces.has(deviceId)) await this.applyPerms(deviceId, clean)
     if (peer) {
       await this.applyPerms(deviceId, clean)
       this.send(peer, { t: 'permissionsChanged', perms: clean })
@@ -1549,6 +1722,152 @@ export class HostController extends EventEmitter {
     if (uuid) await this.d.apollo.disconnect(uuid).catch((e: unknown) => this.log('reset gamepad: disconnect failed', e))
   }
 
+  /** Передать управление: всё получает только этот игрок, у остальных клавиатура, мышь и геймпад снимаются. */
+  async passControl(deviceId: string): Promise<void> {
+    if (!this.isAdmitted(deviceId)) return
+    this.log(`control passed to ${this.friend(deviceId)?.nickname ?? deviceId}`)
+    const ids = new Set([...this.peers.values()].filter((p) => p.admitted && p.deviceId).map((p) => p.deviceId!))
+    for (const id of this.graces.keys()) ids.add(id)
+    // Сначала забираем у остальных, потом выдаём: два игрока не управляют одновременно ни на миг.
+    for (const id of ids) if (id !== deviceId) await this.setPerms(id, NO_INPUT)
+    await this.setPerms(deviceId, ALL_INPUT)
+  }
+
+  /** Зритель: без ввода; выключение возвращает права по умолчанию из настроек. */
+  async setSpectator(deviceId: string, on: boolean): Promise<void> {
+    await this.setPerms(deviceId, on ? NO_INPUT : this.d.settings.get().host.defaultPerms)
+  }
+
+  /**
+   * Сделать геймпад игрока первым. Номер геймпада XInput — порядок, в котором Apollo создал виртуальные геймпады,
+   * поэтому переподключаем геймпады всех играющих: сначала этого игрока, потом остальных (очередь запусков
+   * у хоста сохраняет порядок). Своих геймпадов хоста это не касается: они остаются первыми.
+   */
+  async makePadFirst(deviceId: string): Promise<void> {
+    const players = [...this.peers.values()].filter((p) => p.admitted && p.deviceId && p.status === 'streaming')
+    const target = players.find((p) => p.deviceId === deviceId)
+    if (!target) return
+    const rest = players.filter((p) => p !== target && this.slotOf(p.deviceId!) !== undefined).sort((a, b) => (this.slotOf(a.deviceId!) ?? 9) - (this.slotOf(b.deviceId!) ?? 9))
+    this.log(`pad order: ${[target, ...rest].map((p) => p.nickname).join(', ')}`)
+    for (const p of [target, ...rest]) {
+      await this.resetGamepad(p.deviceId!)
+      await sleep(400)
+    }
+    this.pushPads()
+    this.emitState()
+  }
+
+  /** Номер геймпада игрока (1–4). */
+  private slotOf(deviceId: string): number | undefined {
+    for (const [slot, owner] of this.padOwner) if (owner === deviceId) return slot + 1
+    return undefined
+  }
+
+  /**
+   * Номера геймпадов: новый слот XInput приписываем игроку, который раньше всех из недавно начавших
+   * трансляцию ещё без геймпада (Apollo создаёт геймпады в порядке подключений, занимая свободный слот
+   * с наименьшим номером). Геймпады, что были до начала хостинга, — свои у хоста. Точно — по нажатию (identifyPad).
+   */
+  private async trackPads(): Promise<boolean> {
+    if (!this.d.xinput) return false
+    const slots = await this.d.xinput().catch(() => null)
+    if (!slots) return false
+    let changed = false
+    for (const s of [...slots].sort((a, b) => a.index - b.index)) {
+      const owner = this.padOwner.get(s.index)
+      if (!s.connected) {
+        if (owner !== undefined) {
+          this.padOwner.delete(s.index)
+          changed = true
+        }
+        continue
+      }
+      if (owner !== undefined) continue
+      changed = true
+      if (!this.padsInit) {
+        this.padOwner.set(s.index, 'host')
+        continue
+      }
+      const owned = new Set(this.padOwner.values())
+      const now = Date.now()
+      const candidate = [...this.peers.values()]
+        .filter((p) => p.admitted && p.deviceId && p.status === 'streaming' && !owned.has(p.deviceId) && now - (p.streamStartedAt ?? 0) < 20_000)
+        .filter((p) => this.friend(p.deviceId!)?.perms.gamepad)
+        .sort((a, b) => (a.streamStartedAt ?? 0) - (b.streamStartedAt ?? 0))[0]
+      this.padOwner.set(s.index, candidate?.deviceId ?? '?')
+    }
+    this.padsInit = true
+    if (changed) this.pushPads()
+    return changed
+  }
+
+  /** Игрок спрашивает «какой геймпад мой»: ждём нажатия на любом геймпаде игроков до 10 с. */
+  private async identifyPad(peer: Peer): Promise<void> {
+    const xinput = this.d.xinput
+    // Один поиск за раз, и не чаще раза в 15 с от одного игрока: никто не займёт его постоянно.
+    if (!xinput || this.identifying || Date.now() - (peer.lastIdentify ?? 0) < 15_000) return this.send(peer, { t: 'padIdentified', slot: null })
+    peer.lastIdentify = Date.now()
+    this.identifying = true
+    try {
+      let prev = ((await xinput().catch(() => null)) ?? []).map((s) => s.active)
+      const until = Date.now() + 10_000
+      while (Date.now() < until && this.peers.has(peer.id) && peer.admitted) {
+        await sleep(120)
+        const now = await xinput().catch(() => null)
+        if (!now) continue
+        // Свои геймпады хоста и уже точно определённые слоты других игроков не в счёт.
+        const owned = (i: number): boolean => {
+          const o = this.padOwner.get(i)
+          return o === 'host' || (!!o && o !== '?' && o !== peer.deviceId)
+        }
+        const hit = now.find((s) => s.connected && s.active && !prev[s.index] && !owned(s.index))
+        prev = now.map((s) => s.active)
+        if (!hit) continue
+        for (const [slot, owner] of this.padOwner) if (owner === peer.deviceId) this.padOwner.set(slot, '?')
+        this.padOwner.set(hit.index, peer.deviceId!)
+        this.log(`${peer.nickname} has gamepad ${hit.index + 1}`)
+        this.send(peer, { t: 'padIdentified', slot: hit.index + 1 })
+        this.pushPads()
+        this.emitState()
+        return
+      }
+      this.send(peer, { t: 'padIdentified', slot: null })
+    } finally {
+      this.identifying = false
+    }
+  }
+
+  /** Номера геймпадов — каждому игроку (только при изменениях). */
+  private pushPads(): void {
+    const players = [...this.peers.values()].filter((p) => p.admitted && p.deviceId)
+    const base = [
+      ...players.map((p) => ({ deviceId: p.deviceId!, nickname: p.nickname, slot: this.slotOf(p.deviceId!) ?? null })),
+      ...[...this.graces.values()].map((g) => ({ deviceId: g.deviceId, nickname: g.nickname, slot: this.slotOf(g.deviceId) ?? null }))
+    ]
+    for (const p of players) {
+      const list = base.map((b) => ({ nickname: b.nickname, slot: b.slot, you: b.deviceId === p.deviceId }))
+      const sig = JSON.stringify(list)
+      if (this.padsSent.get(p.id) === sig) continue
+      this.padsSent.set(p.id, sig)
+      this.send(p, { t: 'pads', list })
+    }
+  }
+
+  /**
+   * Потолок битрейта «Авто» зависит от числа игроков: при изменении сообщаем всем новые условия.
+   * Игрок с битрейтом заметно выше нового потолка перезапустит трансляцию (см. клиент).
+   */
+  private rebalance(except?: Peer): void {
+    if (this.phase !== 'running') return
+    const policy = this.policy()
+    if (policy.maxBitrateKbps === this.lastCap) return
+    const first = this.lastCap === 0
+    this.lastCap = policy.maxBitrateKbps
+    if (first) return
+    this.log(`bitrate cap per player: ${policy.maxBitrateKbps} kbps`)
+    for (const p of this.peers.values()) if (p.admitted && p !== except) this.send(p, { t: 'policyUpdate', policy })
+  }
+
   /** Ссылка-приглашение: одна на сеанс хостинга, действует 12 часов (или до остановки хоста). */
   createInvite(): { link: string; expiresAt: number } | null {
     const address = this.d.address()
@@ -1580,6 +1899,7 @@ export class HostController extends EventEmitter {
   /** Отключить всех игроков разом. */
   async kickAll(): Promise<void> {
     const ids = new Set([...this.peers.values()].filter((p) => p.admitted && p.deviceId).map((p) => p.deviceId!))
+    for (const id of this.graces.keys()) ids.add(id)
     for (const id of ids) await this.kick(id)
   }
 
@@ -1607,6 +1927,12 @@ export class HostController extends EventEmitter {
     add('sunshine', st?.sunshineRunning ? 'fail' : 'ok', 'sunshine')
     add('firewall', st?.firewall ? 'ok' : 'warn', 'firewall')
     add('gamepadDriver', st?.gamepadDriver ? 'ok' : 'warn', 'vigem')
+    // Версия Apollo: установленный раньше Apollo не обновляется сам вместе со Streamly.
+    const bundled = this.d.bundledApolloVersion
+    if (st?.installed && st.version && st.version !== '0.0.0') {
+      const outdated = !!bundled && !versionAtLeast(st.version, bundled)
+      add('apolloVersion', outdated ? 'warn' : 'ok', 'apolloOutdated', outdated ? `${st.version} → ${bundled}` : st.version)
+    }
     if (st?.running) {
       const probe = await this.d.apollo.probe().catch(() => 'down' as const)
       add('apolloApi', probe === 'down' ? 'fail' : 'ok', 'apolloApi')
@@ -1643,6 +1969,8 @@ export class HostController extends EventEmitter {
   async kick(deviceId: string): Promise<void> {
     // До следующего запуска хоста выгнанному нужно снова подтверждение, даже если он доверенный.
     this.kicked.add(deviceId)
+    const g = this.endGrace(deviceId)
+    if (g) this.kicked.add(`a:${g.address}`)
     // Ссылку-приглашение выгнанный тоже знает: она меняется, а с его адреса без подтверждения больше не пускаем.
     this.invite = null
     for (const p of [...this.peers.values()]) {
@@ -1657,6 +1985,8 @@ export class HostController extends EventEmitter {
     this.pumpLaunches()
     await this.applyPerms(deviceId, null)
     await this.updateAudio()
+    this.rebalance()
+    this.pushPads()
     this.emitState()
   }
 

@@ -1,6 +1,10 @@
 import { AnimatePresence, motion, useAnimate } from 'framer-motion'
 import {
+  ArrowLeftRight,
   Check,
+  ListOrdered,
+  MoreHorizontal,
+  Tv,
   Copy,
   Download,
   Cpu,
@@ -27,7 +31,7 @@ import {
   WifiOff,
   X
 } from 'lucide-react'
-import { memo, useEffect, useState, type ReactNode, type Ref } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { inviteMessage } from '@shared/invite'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
@@ -534,10 +538,10 @@ function Dashboard({ host }: { host: HostState }) {
 /** Карточки перерисовываются только при изменении своих данных (состояние хоста приходит каждые 2–5 с). */
 const sameJson = <T,>(a: T, b: T): boolean => JSON.stringify(a) === JSON.stringify(b)
 
-const RequestCard = memo(function RequestCard({ r }: { r: JoinRequestView }) {
+export const RequestCard = memo(function RequestCard({ r }: { r: JoinRequestView }) {
   const { t } = useTranslation()
   const [busy, setBusy] = useState(false)
-  const respond = (d: 'allow' | 'trust' | 'deny'): void => {
+  const respond = (d: 'allow' | 'trust' | 'deny' | 'spectate'): void => {
     if (busy) return
     setBusy(true)
     void api().host.respond(r.id, d)
@@ -554,7 +558,7 @@ const RequestCard = memo(function RequestCard({ r }: { r: JoinRequestView }) {
       <div className="request-ring">
         <Avatar name={r.nickname} />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="request-info">
         <div className="player-name">
           <span className="name-text">{r.nickname}</span>
           {!r.known && (
@@ -570,6 +574,9 @@ const RequestCard = memo(function RequestCard({ r }: { r: JoinRequestView }) {
       <div className="request-actions">
         <Button size="sm" variant="ghost" icon={<X size={15} />} disabled={busy} onClick={() => respond('deny')} title={t('host.deny')} aria-label={t('host.deny')}>
           <span className="collapsible">{t('host.deny')}</span>
+        </Button>
+        <Button size="sm" variant="ghost" icon={<Tv size={15} />} disabled={busy} onClick={() => respond('spectate')} title={t('host.spectateHint')} aria-label={t('host.spectate')}>
+          <span className="collapsible">{t('host.spectate')}</span>
         </Button>
         <Button size="sm" icon={<ShieldCheck size={15} />} disabled={busy} onClick={() => respond('trust')} title={t('host.trust')} aria-label={t('host.trust')}>
           <span className="collapsible">{t('host.trust')}</span>
@@ -602,14 +609,144 @@ function PermToggle({ on, selfOff, icon, label, onClick }: { on: boolean; selfOf
   )
 }
 
-const PlayerCard = memo(function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
+/** Меню действий игрока: передать управление, зритель, геймпад. */
+function PlayerMenu({ p }: { p: PlayerView }) {
   const { t } = useTranslation()
-  const resetGamepad = (): void => {
-    void api().host.resetGamepad(p.deviceId)
-    useApp.getState().toast({ tone: 'info', text: t('host.resetGamepadDone', { name: p.nickname }) })
-  }
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  // Самый маленький номер геймпада среди игроков (первый — обычно геймпад самого хоста).
+  const firstPad = useApp((s) => Math.min(99, ...(s.host?.players ?? []).map((x) => x.padSlot ?? 99)))
+  useEffect(() => {
+    if (!open) return
+    // Фокус на первый пункт: меню доступно с клавиатуры.
+    root.current?.querySelector<HTMLButtonElement>('.menu-item')?.focus()
+    const onDown = (e: MouseEvent): void => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      const items = [...(root.current?.querySelectorAll<HTMLButtonElement>('.menu-item') ?? [])]
+      const i = items.indexOf(document.activeElement as HTMLButtonElement)
+      if (e.key === 'Escape') {
+        // Esc закрывает только это меню, а не меню хоста целиком.
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+        trigger.current?.focus()
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus()
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault()
+        items[e.key === 'Home' ? 0 : items.length - 1]?.focus()
+      }
+    }
+    const onFocusOut = (e: FocusEvent): void => {
+      if (!root.current?.contains(e.relatedTarget as Node)) setOpen(false)
+    }
+    const el = root.current
+    window.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    el?.addEventListener('focusout', onFocusOut)
+    return () => {
+      window.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+      el?.removeEventListener('focusout', onFocusOut)
+    }
+  }, [open])
+  const spectator = !p.perms.keyboard && !p.perms.mouse && !p.perms.gamepad
+  const playing = p.status === 'streaming'
+  const toast = useApp.getState().toast
+  const items: { icon: ReactNode; label: string; hint?: string; run: () => void; hidden?: boolean }[] = [
+    {
+      icon: <ArrowLeftRight size={15} />,
+      label: t('host.passControl'),
+      hint: t('host.passControlHint'),
+      run: () => {
+        void api().host.passControl(p.deviceId)
+        toast({ tone: 'info', text: t('host.passControlDone', { name: p.nickname }) })
+      }
+    },
+    {
+      icon: <Tv size={15} />,
+      label: spectator ? t('host.unspectate') : t('host.makeSpectator'),
+      hint: spectator ? undefined : t('host.spectateHint'),
+      run: () => void api().host.setSpectator(p.deviceId, !spectator)
+    },
+    {
+      icon: <RefreshCcw size={15} />,
+      label: t('host.resetGamepad'),
+      hidden: !playing || !p.perms.gamepad,
+      run: () => {
+        void api().host.resetGamepad(p.deviceId)
+        toast({ tone: 'info', text: t('host.resetGamepadDone', { name: p.nickname }) })
+      }
+    },
+    {
+      icon: <ListOrdered size={15} />,
+      label: t('host.makePadFirst'),
+      hint: t('host.makePadFirstHint'),
+      hidden: !playing || !p.perms.gamepad || p.padSlot === undefined || p.padSlot <= firstPad,
+      run: () => {
+        void api().host.makePadFirst(p.deviceId)
+        toast({ tone: 'info', text: t('host.makePadFirstDone', { name: p.nickname }) })
+      }
+    }
+  ]
+  return (
+    <div className="player-menu" ref={root}>
+      <motion.button
+        ref={trigger}
+        className="btn btn-ghost icon-btn"
+        onClick={() => setOpen(!open)}
+        title={t('host.playerActions')}
+        aria-label={t('host.playerActions')}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        whileHover={{ scale: 1.08 }}
+        whileTap={{ scale: 0.9 }}
+      >
+        <MoreHorizontal size={17} />
+      </motion.button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            className="menu-popover card"
+            role="menu"
+            initial={{ opacity: 0, y: -6, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }}
+            transition={{ duration: 0.14 }}
+          >
+            {items
+              .filter((i) => !i.hidden)
+              .map((i) => (
+                <button
+                  key={i.label}
+                  role="menuitem"
+                  className="menu-item"
+                  title={i.hint}
+                  onClick={() => {
+                    setOpen(false)
+                    i.run()
+                  }}
+                >
+                  {i.icon}
+                  <span>{i.label}</span>
+                </button>
+              ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+export const PlayerCard = memo(function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
+  const { t } = useTranslation()
   const toggle = (key: keyof InputPerms): void => void api().host.setPerms(p.deviceId, { [key]: !p.perms[key] })
-  const tone = p.status === 'streaming' ? 'pill-success' : p.status === 'pairing' || p.status === 'connecting' ? 'pill-accent' : ''
+  const tone = p.status === 'streaming' ? 'pill-success' : p.status === 'reconnecting' ? 'pill-warning' : p.status === 'pairing' || p.status === 'connecting' ? 'pill-accent' : ''
+  const spectator = !p.perms.keyboard && !p.perms.mouse && !p.perms.gamepad
   return (
     <motion.div
       ref={ref}
@@ -628,14 +765,26 @@ const PlayerCard = memo(function PlayerCard({ p, ref }: { p: PlayerView; ref?: R
             {p.trusted && <ShieldCheck size={14} className="trusted-icon" aria-label={t('host.trusted')} />}
           </div>
           <span className={`pill ${tone}`} style={{ height: 22, marginTop: 4 }}>
-            {(p.status === 'pairing' || p.status === 'connecting') && <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2 }} />}
+            {(p.status === 'pairing' || p.status === 'connecting' || p.status === 'reconnecting') && <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2 }} />}
             {p.status === 'streaming' && <span className="dot pulse" />}
             {t(`host.status.${p.status}`)}
           </span>
           {p.rttMs !== undefined && <RttBadge ms={p.rttMs} />}
           <div className="player-tags">
             <AnimatePresence initial={false}>
-              {p.poorNetwork && (
+              {p.padSlot !== undefined && (
+                <motion.span key="pad" className="pill pill-accent tag" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} title={t('host.padSlotHint')}>
+                  <Gamepad2 size={11} />
+                  {t('host.padSlot', { n: p.padSlot })}
+                </motion.span>
+              )}
+              {spectator && (
+                <motion.span key="spec" className="pill tag" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }}>
+                  <Tv size={11} />
+                  {t('host.spectator')}
+                </motion.span>
+              )}
+              {p.poorNetwork && p.status !== 'reconnecting' && (
                 <motion.span key="net" className="pill pill-warning tag" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} title={t('host.poorNetworkHint')}>
                   <WifiOff size={11} />
                   {t('host.poorNetwork')}
@@ -650,11 +799,7 @@ const PlayerCard = memo(function PlayerCard({ p, ref }: { p: PlayerView; ref?: R
             </AnimatePresence>
           </div>
         </div>
-        {p.status === 'streaming' && p.perms.gamepad && (
-          <motion.button className="btn btn-ghost icon-btn" onClick={resetGamepad} title={t('host.resetGamepad')} aria-label={t('host.resetGamepad')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
-            <RefreshCcw size={16} />
-          </motion.button>
-        )}
+        <PlayerMenu p={p} />
         <motion.button className="btn btn-ghost icon-btn kick" onClick={() => void api().host.kick(p.deviceId)} title={t('host.kick')} aria-label={t('host.kick')} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.9 }}>
           <UserMinus size={17} />
         </motion.button>

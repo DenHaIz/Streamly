@@ -91,7 +91,8 @@
       "waiting": "in menu",
       "pairing": "pairing",
       "connecting": "connecting",
-      "streaming": "watching"
+      "streaming": "watching",
+      "reconnecting": "reconnecting"
     },
     "noGamepadDriver": "Virtual gamepad driver (ViGEmBus) not found: friends' gamepads will not work.",
     "getDriver": "Download manually",
@@ -150,7 +151,22 @@
     "give": "Give",
     "resetGamepad": "Reconnect gamepad",
     "resetGamepadDone": "Reconnecting {{name}}'s gamepad",
-    "apolloDown": "Apollo stopped responding — restarting it. Players will reconnect on their own in a few seconds."
+    "apolloDown": "Apollo stopped responding — restarting it. Players will reconnect on their own in a few seconds.",
+    "spectate": "Spectator",
+    "spectateHint": "Let in as a spectator: watches without keyboard, mouse or gamepad",
+    "spectator": "spectator",
+    "makeSpectator": "Make spectator",
+    "unspectate": "Give control back",
+    "passControl": "Pass control",
+    "passControlHint": "All control to this player only, everyone else loses it (handy for taking turns)",
+    "passControlDone": "{{name}} has control, others do not",
+    "playerActions": "Player actions",
+    "padSlot": "gamepad {{n}}",
+    "padSlotHint": "Gamepad number on the host (the player's order in the game)",
+    "makePadFirst": "Make gamepad first",
+    "makePadFirstHint": "Players' gamepads reconnect one by one starting with this one (a couple of seconds)",
+    "makePadFirstDone": "Reconnecting gamepads: {{name}} first",
+    "inviteCopiedShort": "Invite copied"
   },
   "connect": {
     "title": "Connect",
@@ -411,8 +427,6 @@
     "showAdvancedHint": "Show rarely needed settings: encoding, bitrate, resolution, mouse modes and more",
     "advancedStream": "Advanced stream settings",
     "advancedHost": "Advanced host settings",
-    "diagnostics": "Diagnostics",
-    "diagnosticsHint": "A report for troubleshooting: versions, network, state and the latest log lines",
     "diagnosticsCopied": "Report copied — paste it into your problem report",
     "copyDiagnostics": "Copy report",
     "openLogs": "Logs folder",
@@ -421,7 +435,9 @@
     "singleGamepad": "All gamepads as one",
     "singleGamepadHint": "Turn on if the game sees two gamepads instead of one (Steam Input, DS4Windows)",
     "requestSound": "Sound on requests",
-    "requestSoundHint": "A short chime when someone wants to join or asks for control; the tray icon blinks"
+    "requestSoundHint": "A short chime when someone wants to join or asks for control; the tray icon blinks",
+    "gameNotify": "Requests over the game",
+    "gameNotifyHint": "A card in the screen corner while you play: answer with the mouse or hotkeys, the game is not minimised"
   },
   "errorHints": {
     "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
@@ -473,7 +489,8 @@
       "hosting": "Hosting is on",
       "audio": "Audio stays on the host",
       "chatRouting": "Discord out of the stream",
-      "encoder": "Video encoder"
+      "encoder": "Video encoder",
+      "apolloVersion": "Apollo version"
     },
     "hints": {
       "radmin": "Start Radmin VPN and join the shared network.",
@@ -500,7 +517,8 @@
       "chatDisabled": "Turned off in the host settings.",
       "noHelper": "Streamly's sound module is missing: reinstall Streamly.",
       "softwareEncoder": "Video is encoded on the CPU: update the graphics driver and restart \"I'm the host\".",
-      "wrongGpu": "The wrong GPU encodes: plug the monitor into the graphics card, not the motherboard."
+      "wrongGpu": "The wrong GPU encodes: plug the monitor into the graphics card, not the motherboard.",
+      "apolloOutdated": "An older Apollo is installed: Streamly ships a newer one. Stop hosting, uninstall Apollo in \"Apps & features\" and press \"I'm the host\" again — Streamly will install the new version (Streamly settings are kept)."
     },
     "summary": {
       "allGood": "Connection is fine — you can connect",
@@ -554,7 +572,19 @@
     "gamepadTitle": "Gamepad doubled or stuck?",
     "gamepadHint": "Reconnecting restarts the stream for a couple of seconds",
     "gamepadOff": "The host turned your gamepad off",
-    "gamepadReset": "Reconnect"
+    "gamepadReset": "Reconnect",
+    "signalLost": "Lost connection to the host — reconnecting, the game keeps going…",
+    "signalBack": "Connection to the host restored",
+    "capLowered": "The host rebalanced bandwidth between players: bitrate up to {{mbps}} Mbit/s",
+    "padsTitle": "Gamepad numbers on the host",
+    "padsHint": "Who controls which gamepad in the host's game (number 1 is usually the host's own).",
+    "padsYou": "{{name}} (you)",
+    "padsUnknown": "Numbers are not known yet — the host learns them when gamepads connect.",
+    "identify": "Which is mine?",
+    "identifyHint": "Not sure about your number — press \"Which is mine?\" and then any button on your gamepad.",
+    "identifyWaiting": "Press any button on your gamepad…",
+    "identifyDone": "Done — the number is updated.",
+    "identifyNotFound": "No button press (or the host runs an older Streamly)."
   },
   "overlay": {
     "title": "Stream menu",
@@ -562,7 +592,7 @@
     "otherScreenHint": "The cursor moves to your other monitor. Click the stream window to come back.",
     "back": "Back to the game",
     "leaveConfirm": "Really disconnect?",
-    "tip": "Esc, Alt+F2 or Ctrl+Shift+F2 — back to the game. Mouse stuck in the stream window — Ctrl+Alt+Shift+Z"
+    "tip": "Esc or {{keys}} — back to the game. Mouse stuck in the stream window — Ctrl+Alt+Shift+Z"
   },
   "invite": {
     "title": "Invite from {{name}}",
@@ -617,5 +647,53 @@
       "disk": "Not enough disk space",
       "other": "Update failed — try again later"
     }
+  },
+  "hostMenu": {
+    "title": "Host menu",
+    "players": "Players: {{count}} of {{max}}",
+    "upload": "upload {{mbps}} Mbit/s",
+    "allowFirst": "allow",
+    "denyFirst": "deny",
+    "tip": "Esc or {{key}} — back to the game",
+    "inviteFailed": "Could not copy the invite"
+  },
+  "hotkeys": {
+    "title": "Hotkeys",
+    "hint": "Click a field, then press a combination. Esc cancels, Backspace turns it off. Keys are only taken when needed: the player menu while playing, host keys while hosting.",
+    "reset": "Defaults",
+    "press": "Press a combination…",
+    "off": "off",
+    "taken": "taken",
+    "active": "active",
+    "invalid": "{{key}} cannot be used: add Ctrl, Alt or Shift with an F key",
+    "duplicate": "{{key}} is already used: {{what}}",
+    "names": {
+      "clientMenu": "Player menu",
+      "clientMenuAlt": "Player menu (fallback)",
+      "hostMenu": "Host menu over the game",
+      "hostPause": "Take and give back control",
+      "hostAllow": "Allow request",
+      "hostDeny": "Deny request"
+    },
+    "hints": {
+      "clientMenu": "Volume, controls, quality, second monitor",
+      "clientMenuAlt": "If Moonlight captures Alt in fullscreen",
+      "hostMenu": "Requests and players without minimising the game",
+      "hostPause": "For all players at once",
+      "hostAllow": "The first join request or control request",
+      "hostDeny": "The first join request or control request"
+    }
+  },
+  "logs": {
+    "title": "Activity log",
+    "hint": "Streamly keeps a log for 14 days (the logs folder in Streamly data). If something goes wrong, save the archive and send it: it has the log, a system report, the last Moonlight log and, on the host, the Apollo log. No passwords or tokens.",
+    "save": "Save log archive",
+    "saved": "Log archive saved — its folder is open",
+    "failed": "Could not save the log archive"
+  },
+  "hostNotify": {
+    "wantsToJoin": "wants to join",
+    "asksControl": "asks for control",
+    "more": "and {{count}} more — open the host menu"
   }
 }

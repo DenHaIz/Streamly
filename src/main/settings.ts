@@ -3,8 +3,9 @@ import { EventEmitter } from 'node:events'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { sanitizeNickname } from '@shared/protocol'
-import { DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type EncoderCustom, type QualityProfile, type Settings } from '@shared/types'
+import { DEFAULT_HOTKEYS, DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type EncoderCustom, type HotkeySettings, type QualityProfile, type Settings } from '@shared/types'
 import { migratePreset } from '@shared/quality'
+import { isAccelerator } from '@shared/hotkeys'
 import { deepMerge, JsonFile, type Cipher } from './store'
 import type { InputPerms } from '@shared/perms'
 
@@ -59,6 +60,23 @@ function normalizeEncoder(c: Partial<EncoderCustom> | undefined): EncoderCustom 
     swPreset: oneOf(c?.swPreset, ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast'] as const, d.swPreset),
     swThreads: clampInt(c?.swThreads, 1, 32, d.swThreads)
   }
+}
+
+export { isAccelerator }
+
+function normalizeHotkeys(h: Partial<HotkeySettings> | undefined): HotkeySettings {
+  const out = { ...DEFAULT_HOTKEYS }
+  for (const k of Object.keys(DEFAULT_HOTKEYS) as (keyof HotkeySettings)[]) {
+    if (isAccelerator(h?.[k])) out[k] = h![k]!
+  }
+  // Одно сочетание на два действия не назначаем: повтор выключается.
+  const seen = new Set<string>()
+  for (const k of Object.keys(out) as (keyof HotkeySettings)[]) {
+    if (!out[k]) continue
+    if (seen.has(out[k])) out[k] = ''
+    else seen.add(out[k])
+  }
+  return out
 }
 
 export const isDisplayId = (v: unknown): v is string => typeof v === 'string' && /^\{[0-9a-fA-F-]{36}\}$/.test(v)
@@ -122,7 +140,8 @@ export function normalizeSettings(s: Settings): Settings {
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
       autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting),
       inviteAutoAdmit: bool(s.host?.inviteAutoAdmit, d.host.inviteAutoAdmit),
-      requestSound: bool(s.host?.requestSound, d.host.requestSound)
+      requestSound: bool(s.host?.requestSound, d.host.requestSound),
+      gameNotify: bool(s.host?.gameNotify, d.host.gameNotify)
     },
     hostQuality: normalizeHostQuality(hostQualityIn),
     updates: {
@@ -130,6 +149,7 @@ export function normalizeSettings(s: Settings): Settings {
       skipped: typeof s.updates?.skipped === 'string' && /^[\w.+-]{0,32}$/.test(s.updates.skipped) ? s.updates.skipped : ''
     },
     showAdvanced: bool(s.showAdvanced, d.showAdvanced),
+    hotkeys: normalizeHotkeys(s.hotkeys),
     recentHosts: Array.isArray(s.recentHosts)
       ? s.recentHosts
           .filter((h) => h && typeof h.address === 'string' && /^[\d.]+$/.test(h.address))

@@ -20,6 +20,10 @@ const bridge: StreamlyBridge = {
   openLogs: () => invoke(IPC.openLogs),
   copyDiagnostics: () => invoke(IPC.copyDiagnostics),
   checkInvite: () => invoke(IPC.checkInvite),
+  getHotkeys: () => invoke(IPC.getHotkeys),
+  suspendHotkeys: (on) => invoke(IPC.suspendHotkeys, on),
+  logError: (text) => invoke(IPC.logError, text),
+  exportLogs: () => invoke(IPC.exportLogs),
   update: {
     getState: () => invoke(IPC.updateGetState),
     check: () => invoke(IPC.updateCheck),
@@ -45,7 +49,12 @@ const bridge: StreamlyBridge = {
     createInvite: () => invoke(IPC.hostCreateInvite),
     respondInput: (id, grant) => invoke(IPC.hostRespondInput, id, grant),
     setInputPaused: (paused) => invoke(IPC.hostSetInputPaused, paused),
-    resetGamepad: (id) => invoke(IPC.hostResetGamepad, id)
+    resetGamepad: (id) => invoke(IPC.hostResetGamepad, id),
+    passControl: (id) => invoke(IPC.hostPassControl, id),
+    setSpectator: (id, on) => invoke(IPC.hostSetSpectator, id, on),
+    makePadFirst: (id) => invoke(IPC.hostMakePadFirst, id),
+    closeMenu: () => invoke(IPC.hostCloseMenu),
+    notifyResize: (h) => invoke(IPC.hostNotifyResize, h)
   },
   client: {
     getState: () => invoke(IPC.clientGetState),
@@ -58,7 +67,8 @@ const bridge: StreamlyBridge = {
     setSelfOff: (patch) => invoke(IPC.clientSetSelfOff, patch),
     restartStream: () => invoke(IPC.clientRestartStream),
     requestInput: (perms) => invoke(IPC.clientRequestInput, perms),
-    resetGamepad: () => invoke(IPC.clientResetGamepad)
+    resetGamepad: () => invoke(IPC.clientResetGamepad),
+    identifyPad: () => invoke(IPC.clientIdentifyPad)
   },
   overlay: {
     close: () => invoke(IPC.overlayClose),

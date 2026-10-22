@@ -53,12 +53,18 @@ export interface ClientDeps {
   speedTestTimeoutMs?: number
   /** Подключён ли этот ПК к сети по Wi-Fi (для подсказок). */
   wifi?: () => Promise<boolean>
+  /** Окно Moonlight не отвечает (зависло). */
+  isHung?: (pid: number) => Promise<boolean>
+  /** Как часто проверять, не завис ли Moonlight. */
+  hungCheckMs?: number
+  /** Сколько пытаться вернуться к хосту после обрыва сигнального соединения. */
+  resumeWindowMs?: number
   log?: (msg: string, err?: unknown) => void
 }
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching', 'streaming']
 
-type TimerName = 'start' | 'lost' | 'pair' | 'queue' | 'hello' | 'idle'
+type TimerName = 'start' | 'lost' | 'pair' | 'queue' | 'hello' | 'idle' | 'resume'
 
 /** Moonlight пишет в лог «Connection status update: N»: 1 — плохая связь, 0 — нормальная. */
 export function parseConnectionStatus(line: string): boolean | undefined {
@@ -129,6 +135,13 @@ export class ClientController extends EventEmitter {
   private autoRaiseTimer: NodeJS.Timeout | null = null
   /** Предыдущий Moonlight ещё закрывается: новый запускаем только после его выхода. */
   private closing: Promise<unknown> | null = null
+  /** Токен возвращения к хосту после короткого обрыва (выдаётся при допуске). */
+  private resume: { address: string; token: string } | null = null
+  private resuming = false
+  private resumeStarted = 0
+  private resumeTimer: NodeJS.Timeout | null = null
+  private hungTimer: NodeJS.Timeout | null = null
+  private identifyTimer: NodeJS.Timeout | null = null
   private inputRequestTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly d: ClientDeps) {
@@ -239,6 +252,10 @@ export class ClientController extends EventEmitter {
       measuring: false,
       speedMbps: undefined,
       active: undefined,
+      pads: undefined,
+      padIdentify: undefined,
+      signalLost: false,
+      capLowered: undefined,
       autoLowered: false,
       relaySuspect: false,
       inputRequest: undefined,
@@ -247,19 +264,30 @@ export class ClientController extends EventEmitter {
     this.selfOff = { ...NO_INPUT }
     this.rttSamples = []
 
-    const ws = new WebSocket(`ws://${address}:${this.d.signalingPort ?? SIGNALING_PORT}`, { handshakeTimeout: this.d.connectTimeoutMs ?? 10_000 })
+    this.openSocket(address, attempt)
+  }
+
+  /** Сигнальное соединение с хостом (новое подключение или возвращение после обрыва). */
+  private openSocket(address: string, attempt: number): void {
+    const resuming = this.resuming
+    const ws = new WebSocket(`ws://${address}:${this.d.signalingPort ?? SIGNALING_PORT}`, {
+      handshakeTimeout: resuming ? 4000 : (this.d.connectTimeoutMs ?? 10_000)
+    })
     this.ws = ws
     ws.on('open', () => {
       // Порт открыт, но хост молчит (не Streamly или завис): не ждём бесконечно.
       this.startTimer('hello', this.d.connectTimeoutMs ?? 10_000, attempt, () => {
+        if (this.resuming) return ws.terminate()
         if (this.state.phase === 'connecting') this.fail('host_not_hosting', 'no answer to hello')
       })
       // Замер задержки и сторож: хост, переставший отвечать, обнаруживаем за ~15 с, а не по таймауту TCP.
       this.lastPong = Date.now()
       if (this.pingTimer) clearInterval(this.pingTimer)
       this.pingTimer = setInterval(() => {
-        if (attempt !== this.attempt) return
+        if (attempt !== this.attempt || this.ws !== ws) return
         if (Date.now() - this.lastPong > (this.d.hostSilenceMs ?? 15_000)) {
+          // Во время игры сначала пробуем переподключиться (трансляция Moonlight идёт отдельно).
+          if (this.canResume(address)) return ws.terminate()
           if (ACTIVE.includes(this.state.phase)) return this.fail('connection_lost', 'host stopped responding')
           return this.teardown()
         }
@@ -274,47 +302,107 @@ export class ClientController extends EventEmitter {
         nickname: s.nickname,
         appVersion: this.d.appVersion,
         trustToken: this.d.secrets.get().hostTokens[address],
-        inviteCode: this.inviteCode
+        inviteCode: this.inviteCode,
+        resumeToken: this.resume?.address === address ? this.resume.token : undefined
       })
     })
     ws.on('message', (data, isBinary) => {
-      if (attempt !== this.attempt) return
+      if (attempt !== this.attempt || this.ws !== ws) return
       this.lastPong = Date.now()
       if (isBinary) return this.onSpeedChunk(data as Buffer)
       const msg = parseHostMessage(data)
       if (msg) void this.onMessage(attempt, address, msg).catch((e) => this.log(`message ${msg.t}`, e))
     })
     ws.on('error', (e: NodeJS.ErrnoException) => {
-      if (attempt !== this.attempt || this.state.phase !== 'connecting') return
+      if (attempt !== this.attempt || this.state.phase !== 'connecting' || this.resuming) return
       // ECONNREFUSED: ПК отвечает, но Streamly на нём не в режиме хоста. Таймаут — нет связи через Radmin.
       if (e.code === 'ECONNREFUSED') return this.fail('host_not_hosting', `${address}: ${e.code}`)
       this.fail('host_unreachable', `${address}: ${e.code ?? e.message}`)
     })
     ws.on('close', () => {
-      if (attempt !== this.attempt) return
+      if (attempt !== this.attempt || this.ws !== ws) return
       this.ws = null
       this.admittedAt = null
+      this.clearTimer('hello')
+      if (this.pingTimer) clearInterval(this.pingTimer)
+      this.pingTimer = null
+      // Повторная попытка возвращения (хост ещё не ответил или соединение снова сорвалось).
+      if (this.resuming) {
+        this.resumeTimer = setTimeout(() => this.resumeTry(address, attempt), 2000)
+        return
+      }
+      // Обрыв во время игры: Moonlight продолжает показывать игру, а мы возвращаемся к хосту по токену.
+      if (this.canResume(address)) return this.beginResume(address, attempt)
       if (ACTIVE.includes(this.state.phase)) {
         this.fail(this.state.phase === 'connecting' ? 'host_unreachable' : 'connection_lost')
       }
     })
   }
 
+  /** Можно ли вернуться к хосту без подтверждения: Moonlight запущен (идёт игра или её запуск), хост выдал токен. */
+  private canResume(address: string): boolean {
+    return (this.state.phase === 'streaming' || this.state.phase === 'launching') && !!this.streamProc && this.resume?.address === address
+  }
+
+  private beginResume(address: string, attempt: number): void {
+    this.resuming = true
+    this.resumeStarted = Date.now()
+    this.log('signaling lost: reconnecting while the stream keeps going')
+    this.set({ signalLost: true })
+    // Общий срок: хост мог не узнать нас (перезапускался) и ждать подтверждения — дольше не ждём.
+    this.startTimer('resume', this.d.resumeWindowMs ?? 20_000, attempt, () => {
+      if (!this.resuming) return
+      this.resuming = false
+      this.fail('connection_lost', 'signaling lost and the host did not come back')
+    })
+    this.resumeTry(address, attempt)
+  }
+
+  private resumeTry(address: string, attempt: number): void {
+    this.resumeTimer = null
+    if (attempt !== this.attempt || !this.resuming) return
+    if ((!this.streamProc && !this.restartPending) || Date.now() - this.resumeStarted > (this.d.resumeWindowMs ?? 20_000)) {
+      this.resuming = false
+      return this.fail('connection_lost', 'signaling lost and the host did not come back')
+    }
+    this.openSocket(address, attempt)
+  }
+
   private async onMessage(attempt: number, address: string, msg: HostMessage): Promise<void> {
     switch (msg.t) {
       case 'hostInfo':
-        if (this.state.phase !== 'connecting') return
+        if (this.state.phase !== 'connecting' && !this.resuming) return
         this.clearTimer('hello')
         this.set({ host: { address, name: msg.hostName } })
         this.send({ t: 'joinRequest' })
-        this.set({ phase: 'waitingApproval' })
+        if (!this.resuming) this.set({ phase: 'waitingApproval' })
         return
       case 'joinDenied':
         return this.fail(
           msg.reason === 'full' ? 'host_full' : msg.reason === 'version' ? 'version_mismatch' : msg.reason === 'busy' ? 'host_busy' : 'denied'
         )
       case 'joinAccepted': {
-        if (this.state.phase !== 'waitingApproval') return
+        if (this.state.phase !== 'waitingApproval' && !this.resuming) return
+        if (msg.resumeToken) this.resume = { address, token: msg.resumeToken }
+        if (this.resuming) {
+          // Вернулись к хосту: трансляция всё это время шла, ничего не перезапускаем.
+          this.resuming = false
+          this.clearTimer('resume')
+          if (this.resumeTimer) clearTimeout(this.resumeTimer)
+          this.resumeTimer = null
+          this.admittedAt = address
+          this.log('back with the host after a short drop')
+          this.set({ signalLost: false, perms: msg.perms, policy: msg.policy })
+          this.sendPrefs()
+          // Трансляция шла всё это время: только проверяем, не снизил ли хост потолок, пока нас не было.
+          if (this.streamProc) return this.checkCap()
+          // Moonlight закрылся ради перезапуска во время обрыва — запускаем сейчас.
+          if (this.restartPending && this.launchAddress) {
+            this.restartPending = false
+            return this.launch(attempt, this.launchAddress)
+          }
+          return
+        }
         if (msg.trustToken) {
           const token = msg.trustToken
           this.d.secrets.update((s) => {
@@ -412,6 +500,20 @@ export class ClientController extends EventEmitter {
         this.log('host asked to reconnect gamepads')
         this.resetGamepad()
         return
+      case 'policyUpdate':
+        // Хост пересчитал потолок битрейта (пришли или ушли игроки).
+        this.set({ policy: msg.policy })
+        return this.checkCap()
+      case 'pads':
+        this.set({ pads: msg.list })
+        return
+      case 'padIdentified':
+        if (this.identifyTimer) clearTimeout(this.identifyTimer)
+        this.identifyTimer = null
+        this.set({ padIdentify: msg.slot ? 'done' : 'notFound' })
+        // Результат виден несколько секунд, потом снова обычная подсказка.
+        this.identifyTimer = setTimeout(() => this.set({ padIdentify: undefined }), 8000)
+        return
     }
   }
 
@@ -504,6 +606,7 @@ export class ClientController extends EventEmitter {
       if (poor !== undefined && attempt === this.attempt && this.streamProc === proc) this.onConnectionStatus(poor)
     })
     this.emit('streamProcess', proc.child?.pid)
+    this.watchHung(attempt, proc)
     this.send({ t: 'sessionStarted' })
     this.startTimer('start', this.d.streamStartTimeoutMs ?? 45_000, attempt, () => {
       // Moonlight запущен, а хост так и не увидел подключение: скорее всего, окно ошибки Moonlight.
@@ -514,9 +617,19 @@ export class ClientController extends EventEmitter {
       if (attempt !== this.attempt || this.streamProc !== proc) return
       this.clearTimer('start')
       this.clearTimer('lost')
+      if (this.hungTimer) clearInterval(this.hungTimer)
+      this.hungTimer = null
       this.streamProc = null
       this.send({ t: 'sessionEnded' })
       this.onConnectionStatus(false, true)
+      if (this.resuming) {
+        // Перезапуск (качество, геймпад, сторож) во время обрыва: запустим, когда хост снова нас пустит.
+        if (this.restartPending && this.launchAddress) return
+        // Игрок сам закрыл Moonlight, пока связь с хостом восстанавливалась: возвращаться больше незачем.
+        this.log('Moonlight closed during a signaling drop: not coming back')
+        this.teardown()
+        return this.set({ phase: 'idle', signalLost: false, restarting: false, reconnecting: false })
+      }
       if (this.restartPending && this.launchAddress && this.ws?.readyState === WebSocket.OPEN) {
         // Перезапуск с новыми настройками: снова в очередь запусков, без нового одобрения.
         this.restartPending = false
@@ -528,7 +641,7 @@ export class ClientController extends EventEmitter {
         return this.fail('stream_failed', [`exit ${code}`, this.d.moonlightLog?.(startedAt)].filter(Boolean).join('\n'))
       }
       // Стрим закончен, а соединение с хостом оставляем: «Подключиться снова» не потребует нового одобрения.
-      this.set({ phase: 'ended' })
+      this.set({ phase: 'ended', restarting: false, reconnecting: false })
       // Но не навсегда: открытое соединение занимает место у хоста.
       this.startTimer('idle', this.d.endedIdleMs ?? 10 * 60_000, attempt, () => {
         if (this.state.phase !== 'ended') return
@@ -538,6 +651,57 @@ export class ClientController extends EventEmitter {
     })
   }
 
+  /**
+   * Сторож: окно Moonlight не отвечает 15 с подряд (зависло на декодере или драйвере) — перезапускаем
+   * трансляцию сами (из бюджета автопереподключений), иначе игрок смотрел бы на застывший кадр.
+   */
+  private watchHung(attempt: number, proc: MoonlightProcess): void {
+    if (this.hungTimer) clearInterval(this.hungTimer)
+    this.hungTimer = null
+    const isHung = this.d.isHung
+    const pid = proc.child?.pid
+    if (!isHung || !pid) return
+    let count = 0
+    this.hungTimer = setInterval(() => {
+      if (attempt !== this.attempt || this.streamProc !== proc) return
+      void isHung(pid)
+        .then((hung) => {
+          if (attempt !== this.attempt || this.streamProc !== proc) return
+          // Считаем только во время игры: при запуске окно бывает занято загрузкой.
+          if (this.state.phase !== 'streaming' || this.resuming) {
+            count = 0
+            return
+          }
+          count = hung ? count + 1 : 0
+          if (count < 3 || this.state.phase !== 'streaming') return
+          count = 0
+          const now = Date.now()
+          this.reconnects = this.reconnects.filter((t) => now - t < 180_000)
+          if (this.reconnects.length >= 2) return this.fail('stream_failed', 'Moonlight is not responding')
+          this.reconnects.push(now)
+          this.log('Moonlight is not responding: restarting the stream')
+          this.set({ reconnecting: true })
+          this.restartPending = true
+          // Зависшее окно не обработает WM_CLOSE: только kill.
+          proc.kill()
+        })
+        .catch(() => undefined)
+    }, this.d.hungCheckMs ?? 5000)
+  }
+
+  /**
+   * Битрейт заметно выше потолка хоста (хост перераспределил канал, пока мы запускались или были без связи) —
+   * перезапускаем трансляцию. Повышение потолка подхватится при следующем запуске: ради него игру не прерываем.
+   */
+  private checkCap(): void {
+    const cap = this.state.policy?.maxBitrateKbps ?? 0
+    const cur = this.state.active?.bitrateKbps ?? 0
+    if (this.state.phase !== 'streaming' || this.resuming || cap <= 0 || cur <= cap * 1.2) return
+    this.log(`host lowered the bitrate cap to ${cap} kbps: restarting the stream`)
+    this.set({ capLowered: cap })
+    this.restartStream(true)
+  }
+
   private onSessionState(attempt: number, streaming: boolean): void {
     if (attempt !== this.attempt || !this.streamProc) return
     if (streaming) {
@@ -545,12 +709,15 @@ export class ClientController extends EventEmitter {
       this.clearTimer('lost')
       if (this.state.phase !== 'streaming' || this.state.restarting || this.state.reconnecting) {
         this.set({ phase: 'streaming', startedAt: this.state.startedAt ?? Date.now(), restarting: false, reconnecting: false })
+        this.checkCap()
       }
       return
     }
     // Хост больше не видит стрим, а Moonlight ещё открыт (например, с окном «соединение потеряно»).
     // Сначала пробуем переподключиться сами (до 2 раз за 3 минуты), потом показываем ошибку.
-    this.startTimer('lost', this.d.streamLostGraceMs ?? 8000, attempt, () => {
+    const onLost = (): void => {
+      // Пока восстанавливается связь с хостом, судить рано: решим, когда он снова пришлёт состояние.
+      if (this.resuming) return this.startTimer('lost', 4000, attempt, onLost)
       if (this.state.phase !== 'streaming') return
       const now = Date.now()
       this.reconnects = this.reconnects.filter((t) => now - t < 180_000)
@@ -562,7 +729,8 @@ export class ClientController extends EventEmitter {
         return
       }
       this.fail('connection_lost', this.d.moonlightLog?.(this.streamStartedAt))
-    })
+    }
+    this.startTimer('lost', this.d.streamLostGraceMs ?? 8000, attempt, onLost)
   }
 
   private clearTimer(name: TimerName): void {
@@ -692,6 +860,15 @@ export class ClientController extends EventEmitter {
     sp.done(bytes > 0 ? this.speedResult() : undefined)
   }
 
+  /** «Какой геймпад мой»: хост ждёт нажатия на геймпаде игрока (до 10 с). */
+  identifyPad(): void {
+    if (!this.admittedAt || this.state.padIdentify === 'waiting') return
+    this.set({ padIdentify: 'waiting' })
+    this.send({ t: 'identifyPad' })
+    if (this.identifyTimer) clearTimeout(this.identifyTimer)
+    this.identifyTimer = setTimeout(() => this.state.padIdentify === 'waiting' && this.set({ padIdentify: 'notFound' }), 13_000)
+  }
+
   /** Игрок просит у хоста ввод, который тот выключил. */
   requestInput(perms: Partial<InputPerms>): void {
     if (!this.admittedAt || this.state.inputRequest === 'pending') return
@@ -782,6 +959,14 @@ export class ClientController extends EventEmitter {
     this.autoLowerTimer = null
     if (this.autoRaiseTimer) clearTimeout(this.autoRaiseTimer)
     this.autoRaiseTimer = null
+    if (this.hungTimer) clearInterval(this.hungTimer)
+    this.hungTimer = null
+    if (this.identifyTimer) clearTimeout(this.identifyTimer)
+    this.identifyTimer = null
+    if (this.resumeTimer) clearTimeout(this.resumeTimer)
+    this.resumeTimer = null
+    this.resuming = false
+    this.resume = null
     if (this.inputRequestTimer) clearTimeout(this.inputRequestTimer)
     this.inputRequestTimer = null
     this.speed?.done?.()
@@ -806,6 +991,8 @@ export class ClientController extends EventEmitter {
       this.send({ t: 'sessionEnded' })
     }
     if (this.ws) {
+      // Уходим сами: хост не держит за нами место, как при обрыве.
+      this.send({ t: 'leave' })
       this.ws.removeAllListeners('close')
       this.ws.close()
       this.ws = null

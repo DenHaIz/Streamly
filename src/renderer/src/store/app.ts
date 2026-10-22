@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, Invite, RadminStatus, Settings, UpdateState } from '@shared/types'
+import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, HotkeyName, HotkeyStatus, Invite, RadminStatus, Settings, UpdateState } from '@shared/types'
 import { api } from '@/lib/bridge'
 import { setLanguage } from '@/i18n'
 import { playChime } from '@/lib/sound'
@@ -43,6 +43,10 @@ interface AppStore {
   dismissUpdate(): void
   settingsTab: SettingsTab
   setSettingsTab(tab: SettingsTab): void
+  /** Состояние горячих клавиш (работает, занята, выключена). */
+  hotkeys: Partial<Record<HotkeyName, HotkeyStatus>>
+  /** Меню хоста поверх игры открыто (только в его окне). */
+  hostMenuOpen: boolean
   setInvite(invite: Invite | null): void
   toasts: Toast[]
   init(): Promise<void>
@@ -74,6 +78,8 @@ export const useApp = create<AppStore>((set, get) => ({
   dismissUpdate: () => set({ updateDismissed: true }),
   settingsTab: 'general',
   setSettingsTab: (settingsTab) => set({ settingsTab }),
+  hotkeys: {},
+  hostMenuOpen: false,
   toasts: [],
   diag: null,
   openDiag: (target) => set({ diag: target }),
@@ -90,6 +96,9 @@ export const useApp = create<AppStore>((set, get) => ({
       b.client.getHosts(),
       b.update.getState()
     ])
+    void b.getHotkeys().then((hotkeys) => set({ hotkeys }))
+    b.on('hotkeys', (hotkeys) => set({ hotkeys }))
+    b.on('hostMenu', ({ open }) => set({ hostMenuOpen: open }))
     b.on('settings', (s) => {
       if (s.language !== get().settings?.language) setLanguage(s.language)
       set({ settings: s })
@@ -100,7 +109,8 @@ export const useApp = create<AppStore>((set, get) => ({
     b.on('hosts', (h) => set({ hosts: h }))
     b.on('overlay', (o) => set({ overlay: o }))
     b.on('update', (u) => set({ update: u }))
-    b.on('alert', ({ kind }) => playChime(kind))
+    // Звук — только в главном окне (окна поверх игры получают те же события).
+    if (!location.hash) b.on('alert', ({ kind }) => playChime(kind))
     // Пункты меню в трее открывают нужный экран.
     b.on('navigate', (to) => {
       if (!get().settings?.onboarded) return

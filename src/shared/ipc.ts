@@ -12,10 +12,13 @@ import type {
   RadminStatus,
   Settings,
   TrustedFriendView,
-  UpdateState
+  UpdateState,
+  HotkeyName,
+  HotkeyStatus
 } from './types'
 
-export type JoinDecision = 'allow' | 'trust' | 'deny'
+/** spectate — пустить зрителем: без клавиатуры, мыши и геймпада. */
+export type JoinDecision = 'allow' | 'trust' | 'deny' | 'spectate'
 
 export interface BridgeEvents {
   settings: Settings
@@ -32,6 +35,10 @@ export interface BridgeEvents {
   navigate: NavTarget
   /** Хосту нужно внимание (запрос на подключение, просьба об управлении): звук в интерфейсе. */
   alert: { kind: 'joinRequest' | 'inputRequest' }
+  /** Состояние горячих клавиш (работает, занята, выключена). */
+  hotkeys: Record<HotkeyName, HotkeyStatus>
+  /** Меню хоста поверх игры открыто или закрыто (только в его окне). */
+  hostMenu: { open: boolean }
 }
 
 export type NavTarget = 'home' | 'host' | 'connect' | 'settings' | 'about'
@@ -65,6 +72,15 @@ export interface StreamlyBridge {
     skip(version: string): Promise<void>
   }
 
+  /** Состояние горячих клавиш. */
+  getHotkeys(): Promise<Record<HotkeyName, HotkeyStatus>>
+  /** Пока в настройках записывают новое сочетание, горячие клавиши Streamly отпущены (иначе нажатие сработало бы). */
+  suspendHotkeys(on: boolean): Promise<void>
+  /** Ошибка в интерфейсе — в журнал Streamly. */
+  logError(text: string): Promise<void>
+  /** Сохранить журнал за 14 дней одним архивом (диалог «Сохранить как»). Путь к файлу или null, если отменили. */
+  exportLogs(): Promise<string | null>
+
   host: {
     getState(): Promise<HostState>
     start(): Promise<void>
@@ -93,6 +109,16 @@ export interface StreamlyBridge {
     setInputPaused(paused: boolean): Promise<void>
     /** Переподключить геймпады игрока (двойной или зависший геймпад). */
     resetGamepad(deviceId: string): Promise<void>
+    /** Передать управление: всё получает только этот игрок, у остальных снимается. */
+    passControl(deviceId: string): Promise<void>
+    /** Зритель: без клавиатуры, мыши и геймпада (false — вернуть права по умолчанию). */
+    setSpectator(deviceId: string, on: boolean): Promise<void>
+    /** Сделать геймпад игрока первым: переподключить геймпады всех, начиная с него. */
+    makePadFirst(deviceId: string): Promise<void>
+    /** Меню хоста поверх игры: закрыть. */
+    closeMenu(): Promise<void>
+    /** Плашка запросов поверх игры: высота содержимого (окно подгоняется). */
+    notifyResize(height: number): Promise<void>
   }
 
   client: {
@@ -113,6 +139,8 @@ export interface StreamlyBridge {
     requestInput(perms: Partial<InputPerms>): Promise<void>
     /** Переподключить свои геймпады: быстрый перезапуск трансляции, хост создаёт геймпады заново. */
     resetGamepad(): Promise<boolean>
+    /** «Какой геймпад мой»: хост ждёт нажатия на вашем геймпаде. */
+    identifyPad(): Promise<void>
   }
 
   /** Меню во время игры (Alt+F2). */
@@ -146,6 +174,16 @@ export const IPC = {
   updateInstall: 'update:install',
   updateSkip: 'update:skip',
   hostResetGamepad: 'host:resetGamepad',
+  hostPassControl: 'host:passControl',
+  hostSetSpectator: 'host:setSpectator',
+  hostMakePadFirst: 'host:makePadFirst',
+  hostCloseMenu: 'host:closeMenu',
+  hostNotifyResize: 'host:notifyResize',
+  clientIdentifyPad: 'client:identifyPad',
+  getHotkeys: 'app:hotkeys',
+  suspendHotkeys: 'app:suspendHotkeys',
+  logError: 'app:logError',
+  exportLogs: 'app:exportLogs',
   clientResetGamepad: 'client:resetGamepad',
   hostGetState: 'host:getState',
   hostStart: 'host:start',

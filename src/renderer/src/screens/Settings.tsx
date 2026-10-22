@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Download, Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Stethoscope, Sun, Tv, Volume2, Wrench } from 'lucide-react'
+import { Archive, ClipboardCopy, Download, FileText, FolderOpen, Gamepad2, Info, Keyboard, Monitor, Moon, Mouse, Server, ShieldCheck, SlidersHorizontal, Stethoscope, Sun, Tv, Volume2, Wrench } from 'lucide-react'
 import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -10,6 +10,7 @@ import { api } from '@/lib/bridge'
 import { PixelLogo } from '@/components/PixelLogo'
 import { EncoderCustomPanel } from '@/components/EncoderCustomPanel'
 import { UpdatePanel } from '@/components/Update'
+import { HotkeysCard } from '@/components/Hotkeys'
 import { useVolume } from '@/components/StreamControls'
 import { Avatar, Button, Collapse, Row, Segmented, Select, Slider, softSpring, spring, Switch } from '@/components/ui'
 
@@ -153,21 +154,52 @@ function General() {
           <Switch checked={s.closeToTray} onChange={(v) => void update({ closeToTray: v })} />
         </Row>
       </div>
+      <HotkeysCard />
+      <LogsCard />
       <AdvancedCard>
         <Row title={t('settings.autoStartHosting')} hint={t('settings.autoStartHostingHint')}>
           <Switch checked={s.host.autoStartHosting} onChange={(v) => void update({ host: { autoStartHosting: v } })} />
         </Row>
-        <Row title={t('settings.diagnostics')} hint={t('settings.diagnosticsHint')}>
-          <div className="row-buttons">
-            <Button size="sm" onClick={() => void api().copyDiagnostics().then(() => useApp.getState().toast({ tone: 'success', text: t('settings.diagnosticsCopied') }))}>
-              {t('settings.copyDiagnostics')}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => void api().openLogs()}>
-              {t('settings.openLogs')}
-            </Button>
-          </div>
-        </Row>
       </AdvancedCard>
+    </div>
+  )
+}
+
+/** Журнал работы: 14 дней, архив для отправки, отчёт в буфер. */
+function LogsCard() {
+  const { t } = useTranslation()
+  const toast = useApp((x) => x.toast)
+  const [busy, setBusy] = useState(false)
+  const save = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const path = await api().exportLogs()
+      if (path) toast({ tone: 'success', text: t('logs.saved') }, 6000)
+    } catch {
+      toast({ tone: 'danger', text: t('logs.failed') })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="card card-pad">
+      <div className="section-title">
+        <FileText size={14} />
+        {t('logs.title')}
+      </div>
+      <div className="faint hotkeys-hint">{t('logs.hint')}</div>
+      <div className="row-buttons" style={{ marginTop: 10 }}>
+        <Button size="sm" variant="primary" icon={<Archive size={15} />} loading={busy} onClick={() => void save()}>
+          {t('logs.save')}
+        </Button>
+        <Button size="sm" icon={<ClipboardCopy size={15} />} onClick={() => void api().copyDiagnostics().then(() => toast({ tone: 'success', text: t('settings.diagnosticsCopied') }))}>
+          {t('settings.copyDiagnostics')}
+        </Button>
+        <Button size="sm" variant="ghost" icon={<FolderOpen size={15} />} onClick={() => void api().openLogs()}>
+          {t('settings.openLogs')}
+        </Button>
+      </div>
     </div>
   )
 }
@@ -180,6 +212,7 @@ function StreamTab() {
   const set = (patch: Partial<typeof st>): void => void update({ stream: patch })
   const preset = currentPreset(st)
   const [vol, setVol] = useVolume()
+  const keys = useApp((x) => x.settings!.hotkeys)
   return (
     <div className="settings-stack">
       <div className="card card-pad">
@@ -223,8 +256,9 @@ function StreamTab() {
         </Row>
         <Row title={t('settings.overlayKey')} hint={t('settings.overlayKeyHint')}>
           <span className="kbd-group">
-            <kbd className="kbd">Alt+F2</kbd>
-            <kbd className="kbd">Ctrl+Shift+F2</kbd>
+            {keys.clientMenu && <kbd className="kbd">{keys.clientMenu}</kbd>}
+            {keys.clientMenuAlt && <kbd className="kbd">{keys.clientMenuAlt}</kbd>}
+            {!keys.clientMenu && !keys.clientMenuAlt && <span className="faint">{t('hotkeys.off')}</span>}
           </span>
         </Row>
       </div>
@@ -406,6 +440,9 @@ function HostTab() {
         </Row>
         <Row title={t('settings.requestSound')} hint={t('settings.requestSoundHint')}>
           <Switch checked={h.requestSound} onChange={(v) => void update({ host: { requestSound: v } })} />
+        </Row>
+        <Row title={t('settings.gameNotify')} hint={t('settings.gameNotifyHint')}>
+          <Switch checked={h.gameNotify} onChange={(v) => void update({ host: { gameNotify: v } })} />
         </Row>
         <Row title={t('settings.inviteAutoAdmit')} hint={t('settings.inviteAutoAdmitHint')}>
           <Switch checked={h.inviteAutoAdmit} onChange={(v) => void update({ host: { inviteAutoAdmit: v } })} />

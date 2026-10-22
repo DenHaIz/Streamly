@@ -24,7 +24,7 @@ Streamly ставит и настраивает Apollo, сопрягает Moonl
 | | |
 |---|---|
 | Версия | **0.5** (в `package.json` — `0.5.0`) |
-| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.5 (тег `v0.5`) |
+| Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.5 (тег `v0.5` → коммит `4298319`) |
 | Установщик | `Streamly-Setup-0.5.0.exe`, 157,9 МБ, SHA-256 `f6d091dc32bfec475a0b79d06be364a5a50b72498a5e7b5590c22dbf393d2ead`. В релизе также `.blockmap` и `latest.yml` для автообновления |
 | Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.5.0.exe (имя файла меняется с каждой версией: при релизе обновлять README и INSTALL) |
 | Прошлые релизы | [0.4](https://github.com/DenHaIz/Streamly/releases/tag/v0.4), [0.3](https://github.com/DenHaIz/Streamly/releases/tag/v0.3), [0.2](https://github.com/DenHaIz/Streamly/releases/tag/v0.2), [0.1](https://github.com/DenHaIz/Streamly/releases/tag/v0.1) |

@@ -8,7 +8,7 @@ import { api } from '@/lib/bridge'
 import { Avatar, Button, riseIn, softSpring, spring, stagger } from '@/components/ui'
 import { RadminHelp } from '@/components/RadminBadge'
 import { ErrorCard } from '@/components/ErrorCard'
-import { StreamControls } from '@/components/StreamControls'
+import { StreamControls, StreamStats } from '@/components/StreamControls'
 
 const ACTIVE: ClientState['phase'][] = ['connecting', 'waitingApproval', 'pairing', 'launching']
 
@@ -210,7 +210,12 @@ function Progress({ client }: { client: ClientState }) {
             {t('connect.approvalHint')}
           </motion.p>
         )}
-        {(client.phase === 'pairing' || client.phase === 'launching') && (
+        {client.measuring && (
+          <motion.p key="measuring" className="muted" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            {t('connect.measuring')}
+          </motion.p>
+        )}
+        {!client.measuring && (client.phase === 'pairing' || client.phase === 'launching') && (
           <motion.p key="firewall" className="faint" style={{ fontSize: 12.5 }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
             {t('connect.firewallHint')}
           </motion.p>
@@ -260,6 +265,7 @@ function Streaming({ client }: { client: ClientState }) {
         <kbd className="kbd">Alt+F2</kbd>
         <span>{t('connect.overlayHint')}</span>
       </div>
+      <StreamStats withMoonlight />
       <StreamControls />
       <Button variant="danger" icon={<Unplug size={16} />} onClick={() => void api().client.cancel()}>
         {t('connect.disconnect')}

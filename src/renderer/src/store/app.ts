@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, RadminStatus, Settings } from '@shared/types'
+import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, Invite, RadminStatus, Settings } from '@shared/types'
 import { api } from '@/lib/bridge'
 import { setLanguage } from '@/i18n'
 
@@ -32,6 +32,9 @@ interface AppStore {
   hosts: DiscoveredHost[]
   /** Меню Alt+F2 (только в его окне). */
   overlay: { open: boolean; screens: number }
+  /** Приглашение, которое предлагаем принять. */
+  invite: Invite | null
+  setInvite(invite: Invite | null): void
   toasts: Toast[]
   init(): Promise<void>
   go(screen: Screen): void
@@ -55,6 +58,8 @@ export const useApp = create<AppStore>((set, get) => ({
   client: { phase: 'idle' },
   hosts: [],
   overlay: { open: false, screens: 1 },
+  invite: null,
+  setInvite: (invite) => set({ invite }),
   toasts: [],
   diag: null,
   openDiag: (target) => set({ diag: target }),

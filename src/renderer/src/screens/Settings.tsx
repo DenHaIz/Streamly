@@ -4,10 +4,11 @@ import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
-import type { Codec, DisplayMode, HostDisplay, Lang, LossProtection, Resolution, CaptureKeys, ThemePref, TrustedFriendView } from '@shared/types'
+import type { Codec, DisplayMode, EncoderPreset, HostDisplay, Lang, LossProtection, Resolution, CaptureKeys, ThemePref, TrustedFriendView } from '@shared/types'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { PixelLogo } from '@/components/PixelLogo'
+import { EncoderCustomPanel } from '@/components/EncoderCustomPanel'
 import { Avatar, Button, Row, Segmented, Select, Slider, softSpring, spring, Switch } from '@/components/ui'
 
 type Tab = 'general' | 'stream' | 'host' | 'about'
@@ -118,16 +119,22 @@ function StreamTab() {
     <div style={{ display: 'grid', gap: 16 }}>
     <div className="card card-pad">
       <div className="section-title">{t('settings.quality')}</div>
-      <Segmented<Preset | 'custom'>
-        value={preset}
-        onChange={(v) => v !== 'custom' && set(PRESETS[v])}
-        options={(['economy', 'balanced', 'high', 'custom'] as const).map((v) => ({ value: v, label: t(`settings.presets.${v}`) }))}
-      />
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.div key={preset} className="preset-hint" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.16 }}>
-          {t(`settings.presetsHint.${preset}`)}
-        </motion.div>
-      </AnimatePresence>
+      <Row title={t('settings.autoQuality')} hint={t('settings.autoQualityHint')}>
+        <Switch checked={st.autoQuality} onChange={(v) => set({ autoQuality: v })} />
+      </Row>
+      <div style={{ opacity: st.autoQuality ? 0.5 : 1, pointerEvents: st.autoQuality ? 'none' : undefined, transition: 'opacity 0.25s', marginTop: 10 }} aria-disabled={st.autoQuality}>
+        <Segmented<Preset | 'custom'>
+          value={preset}
+          onChange={(v) => v !== 'custom' && set(PRESETS[v])}
+          options={(['economy', 'balanced', 'high', 'custom'] as const).map((v) => ({ value: v, label: t(`settings.presets.${v}`) }))}
+        />
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div key={preset} className="preset-hint" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.16 }}>
+            {st.autoQuality ? t('settings.presetsByAuto') : t(`settings.presetsHint.${preset}`)}
+          </motion.div>
+        </AnimatePresence>
+      </div>
+      <HostQualityList />
     </div>
     <div className="card card-pad">
       <div className="section-title">{t('settings.inGame')}</div>
@@ -193,6 +200,12 @@ function StreamTab() {
           options={(['fullscreen', 'borderless', 'windowed'] as const).map((v) => ({ value: v, label: t(`settings.displayModes.${v}`) }))}
         />
       </Row>
+      <Row title={t('settings.hdr')} hint={t('settings.hdrHint')}>
+        <Switch checked={st.hdr} onChange={(v) => set({ hdr: v })} />
+      </Row>
+      <Row title={t('settings.yuv444')} hint={t('settings.yuv444Hint')}>
+        <Switch checked={st.yuv444} onChange={(v) => set({ yuv444: v })} />
+      </Row>
       <Row title={t('settings.absoluteMouse')} hint={t('settings.absoluteMouseHint')}>
         <Switch checked={st.absoluteMouse} onChange={(v) => set({ absoluteMouse: v })} />
       </Row>
@@ -220,6 +233,39 @@ function StreamTab() {
         />
       </Row>
     </div>
+    </div>
+  )
+}
+
+/** Своё качество отдельных хостов (запоминается из меню Alt+F2). */
+function HostQualityList() {
+  const { t } = useTranslation()
+  const hq = useApp((x) => x.settings!.hostQuality)
+  const recent = useApp((x) => x.settings!.recentHosts)
+  const update = useApp((x) => x.updateSettings)
+  const entries = Object.entries(hq)
+  if (!entries.length) return null
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="section-title">{t('settings.hostQuality')}</div>
+      <AnimatePresence initial={false}>
+        {entries.map(([addr, q]) => {
+          const p = currentPreset(q)
+          return (
+            <motion.div key={addr} className="row" layout initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0, padding: 0 }} transition={softSpring}>
+              <div className="row-text">
+                <div className="row-title">{recent.find((h) => h.address === addr)?.name ?? addr}</div>
+                <div className="row-hint">
+                  {addr} · {t(`settings.presets.${p}`)}
+                </div>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => void update({ hostQuality: { [addr]: null } } as never)}>
+                {t('settings.resetHostQuality')}
+              </Button>
+            </motion.div>
+          )
+        })}
+      </AnimatePresence>
     </div>
   )
 }
@@ -285,6 +331,7 @@ function HostTab() {
             value={h.maxBitrateKbps}
             onChange={(v) => void update({ host: { maxBitrateKbps: v } })}
             options={[
+              { value: -1, label: t('settings.bitrateCapAuto') },
               ...[5, 10, 15, 20, 30, 50].map((m) => ({ value: m * 1000, label: t('settings.mbps', { value: m }) })),
               { value: 0, label: t('settings.unlimited') }
             ]}
@@ -292,6 +339,9 @@ function HostTab() {
         </Row>
         <Row title={t('settings.notifyRequests')}>
           <Switch checked={h.notifyRequests} onChange={(v) => void update({ host: { notifyRequests: v } })} />
+        </Row>
+        <Row title={t('settings.inviteAutoAdmit')} hint={t('settings.inviteAutoAdmitHint')}>
+          <Switch checked={h.inviteAutoAdmit} onChange={(v) => void update({ host: { inviteAutoAdmit: v } })} />
         </Row>
       </div>
 
@@ -313,6 +363,14 @@ function HostTab() {
             </motion.div>
           )}
         </AnimatePresence>
+        <Row title={t('settings.encoderPreset')} hint={t(`settings.encoderPresetHint.${h.encoderPreset}`)}>
+          <Segmented<EncoderPreset>
+            value={h.encoderPreset}
+            onChange={(v) => void update({ host: { encoderPreset: v } })}
+            options={(['latency', 'balanced', 'quality', 'custom'] as const).map((v) => ({ value: v, label: t(`settings.encoderPresets.${v}`) }))}
+          />
+        </Row>
+        <AnimatePresence initial={false}>{h.encoderPreset === 'custom' && <EncoderCustomPanel />}</AnimatePresence>
         <Row title={t('settings.lossProtection')} hint={t('settings.lossProtectionHint')}>
           <Segmented<LossProtection>
             value={h.lossProtection}

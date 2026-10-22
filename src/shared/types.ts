@@ -27,12 +27,44 @@ export interface StreamSettings {
   volume: number
   /** Просить хоста убрать из трансляции Discord (чтобы не слышать свой голос и голоса друзей дважды). */
   muteHostChat: boolean
+  /** Автоподбор качества: замер канала перед стартом и снижение при плохой связи. */
+  autoQuality: boolean
+  /** HDR (нужно включить HDR в Windows на обоих ПК). */
+  hdr: boolean
+  /** Цвет 4:4:4: чёткий текст, но больше трафика и нужна поддержка с обеих сторон. */
+  yuv444: boolean
 }
+
+/** Качество для конкретного хоста (запоминается из меню Alt+F2). */
+export type QualityProfile = Pick<StreamSettings, 'resolution' | 'fps' | 'bitrateKbps'>
 
 /** Какой монитор хоста транслировать: основной, виртуальный или конкретный (id устройства Apollo). */
 export type HostDisplayChoice = 'primary' | 'virtual' | string
 
 export type LossProtection = 'normal' | 'high'
+
+/** Баланс кодирования: задержка или качество картинки при том же битрейте. */
+export type EncoderPreset = 'latency' | 'balanced' | 'quality' | 'custom'
+
+/**
+ * Ручная настройка кодировщика (EncoderPreset = 'custom'). Apollo берёт параметры того кодировщика,
+ * который нашёл на ПК: NVIDIA, AMD, Intel Quick Sync или процессор.
+ */
+export interface EncoderCustom {
+  /** NVENC P1–P7: больше — лучше картинка и дольше кодирование. */
+  nvPreset: number
+  nvTwoPass: 'disabled' | 'quarter_res' | 'full_res'
+  nvSpatialAq: boolean
+  amdUsage: 'ultralowlatency' | 'lowlatency' | 'lowlatency_high_quality'
+  amdQuality: 'speed' | 'balanced' | 'quality'
+  amdRc: 'vbr_latency' | 'cbr' | 'vbr_peak'
+  amdPreanalysis: boolean
+  amdVbaq: boolean
+  qsvPreset: 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow'
+  swPreset: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast'
+  /** Минимум потоков процессора на кодирование. */
+  swThreads: number
+}
 
 export interface HostSettings {
   maxPlayers: number
@@ -40,7 +72,10 @@ export interface HostSettings {
   display: HostDisplayChoice
   /** Виртуальный монитор: на время игры выключать физические мониторы хоста (друзья видят весь рабочий стол). */
   virtualOnly: boolean
-  /** Потолок битрейта на одного игрока, кбит/с (0 — без ограничения). Apollo кодирует поток каждому отдельно. */
+  /**
+   * Потолок битрейта на одного игрока, кбит/с: 0 — без ограничения, -1 — авто (30 Мбит/с на 1–2 игроков,
+   * 20 — на 3–4). Apollo кодирует поток каждому отдельно.
+   */
   maxBitrateKbps: number
   /** Звук игры остаётся и на колонках хоста (иначе Apollo может переключить вывод на виртуальное устройство). */
   keepHostAudio: boolean
@@ -48,10 +83,15 @@ export interface HostSettings {
   chatRouting: boolean
   /** Доля избыточных пакетов (FEC): «высокая» лучше переживает потери при нескольких игроках. */
   lossProtection: LossProtection
+  /** Пресет кодировщика (NVENC P1/P3/P5 и аналоги у AMD и Intel). */
+  encoderPreset: EncoderPreset
+  encoderCustom: EncoderCustom
   /** Уведомлять о запросах на подключение, когда окно Streamly не активно. */
   notifyRequests: boolean
   /** Включать режим хоста сразу при запуске Streamly. */
   autoStartHosting: boolean
+  /** Друзья со ссылкой-приглашением входят без подтверждения. */
+  inviteAutoAdmit: boolean
 }
 
 /** Условия трансляции, которые хост сообщает игроку при допуске. */
@@ -62,6 +102,17 @@ export interface StreamPolicy {
   hostWidth: number
   hostHeight: number
   hostFps: number
+  /** Чем кодирует видео хост (по логу Apollo). */
+  encoder?: HostEncoder
+}
+
+export type EncoderVendor = 'nvenc' | 'amdvce' | 'quicksync' | 'software' | 'other'
+
+/** Кодировщик видео хоста. */
+export interface HostEncoder {
+  vendor: EncoderVendor
+  hevc: boolean
+  av1: boolean
 }
 
 /** Монитор хоста по данным Apollo. */
@@ -110,11 +161,13 @@ export interface Settings {
   stream: StreamSettings
   host: HostSettings
   recentHosts: RecentHost[]
+  /** Своё качество для отдельных хостов (по адресу). */
+  hostQuality: Record<string, QualityProfile>
 }
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
 
-export const SETTINGS_SCHEMA = 2
+export const SETTINGS_SCHEMA = 3
 
 export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'language'> = {
   schema: SETTINGS_SCHEMA,
@@ -136,21 +189,42 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     captureSystemKeys: 'fullscreen',
     absoluteMouse: true,
     volume: 100,
-    muteHostChat: true
+    muteHostChat: true,
+    autoQuality: false,
+    hdr: false,
+    yuv444: false
   },
   host: {
     maxPlayers: 4,
     defaultPerms: { keyboard: true, mouse: true, gamepad: true },
     display: 'primary',
     virtualOnly: false,
-    maxBitrateKbps: 20000,
+    maxBitrateKbps: -1,
     keepHostAudio: true,
     chatRouting: true,
     lossProtection: 'high',
+    // Под видеокарты NVIDIA RTX: P3 заметно чище P1 при почти той же задержке.
+    encoderPreset: 'balanced',
+    // Ручная настройка начинается со значений «Баланса» (под RTX: P3, двухпроходное в четверть разрешения).
+    encoderCustom: {
+      nvPreset: 3,
+      nvTwoPass: 'quarter_res',
+      nvSpatialAq: false,
+      amdUsage: 'ultralowlatency',
+      amdQuality: 'balanced',
+      amdRc: 'vbr_latency',
+      amdPreanalysis: false,
+      amdVbaq: true,
+      qsvPreset: 'fast',
+      swPreset: 'superfast',
+      swThreads: 4
+    },
     notifyRequests: true,
-    autoStartHosting: false
+    autoStartHosting: false,
+    inviteAutoAdmit: true
   },
-  recentHosts: []
+  recentHosts: [],
+  hostQuality: {}
 }
 
 export interface RadminStatus {
@@ -216,6 +290,10 @@ export interface PlayerView {
   muteChat: boolean
   /** Moonlight у игрока сообщает о плохой связи. */
   poorNetwork: boolean
+  /** Игрок просит выдать ему ввод (то, что хост выключил). */
+  inputRequest?: InputPerms
+  /** Вошёл по ссылке-приглашению. */
+  viaInvite: boolean
 }
 
 export interface JoinRequestView {
@@ -242,6 +320,14 @@ export interface HostState {
   audio: HostAudioState
   /** Настройки монитора или защиты от потерь поменялись во время игры: применятся, когда все отключатся. */
   pendingRestart: boolean
+  /** Кодировщик видео (после первого запуска Apollo). */
+  encoder?: HostEncoder
+  /** Исходящий поток хоста по адаптеру сети Radmin, Мбит/с. */
+  uploadMbps?: number
+  /** Хост временно забрал ввод у всех игроков. */
+  inputPaused: boolean
+  /** Видео кодирует не та видеокарта (например, встроенная графика Ryzen при наличии RTX). */
+  wrongGpu?: { encoderVendor: EncoderVendor; better: string }
 }
 
 export interface TrustedFriendView {
@@ -283,6 +369,31 @@ export interface ClientState {
   poorNetwork?: boolean
   /** Трансляция перезапускается с новыми настройками качества. */
   restarting?: boolean
+  /** Переподключение после обрыва (автоматически). */
+  reconnecting?: boolean
+  /** Идёт замер скорости канала до хоста. */
+  measuring?: boolean
+  /** Скорость канала от хоста по замеру, Мбит/с. */
+  speedMbps?: number
+  /** С какими параметрами запущена трансляция. */
+  active?: { width: number; height: number; fps: number; bitrateKbps: number; auto: boolean }
+  /** Автоподбор снизил качество из-за плохой связи. */
+  autoLowered?: boolean
+  /** Подключение к сети по Wi-Fi (кабель надёжнее). */
+  wifi?: boolean
+  /** Похоже на подключение через ретранслятор Radmin. */
+  relaySuspect?: boolean
+  /** Просьба выдать ввод: ждём ответа хоста или хост отказал. */
+  inputRequest?: 'pending' | 'denied'
+  /** Хост временно забрал ввод у всех. */
+  inputPaused?: boolean
+}
+
+/** Ссылка-приглашение streamly://join/... */
+export interface Invite {
+  address: string
+  name: string
+  code?: string
 }
 
 // ---------- Проверка связи ----------

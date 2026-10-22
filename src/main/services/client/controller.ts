@@ -2,9 +2,10 @@ import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { NO_INPUT, type InputPerms } from '@shared/perms'
 import { parseHostMessage, PROTOCOL_VERSION, SIGNALING_PORT, type ClientMessage, type HostMessage } from '@shared/protocol'
-import type { ClientState, DiscoveredHost, ErrorCode, HostSource, StreamPolicy, StreamSettings } from '@shared/types'
+import type { ClientState, DiscoveredHost, ErrorCode, HostSource, QualityProfile, StreamPolicy, StreamSettings } from '@shared/types'
 import type { SecretsService, SettingsService } from '../../settings'
-import type { MoonlightProcess } from '../moonlight/runner'
+import { streamParams, type MoonlightProcess } from '../moonlight/runner'
+import { autoProfile, lowerProfile, relaySuspect } from './quality'
 import type { ProbeResult } from '../net/discovery'
 
 export interface MoonlightLike {
@@ -20,7 +21,7 @@ export interface ClientDeps {
   moonlight: MoonlightLike
   appVersion: string
   /** Разрешение основного экрана клиента (для режима «авто»). */
-  nativeResolution?: () => { width: number; height: number } | undefined
+  nativeResolution?: () => { width: number; height: number; fps?: number } | undefined
   /** Поиск хостов. */
   probe: (targets: string[], onFound: (r: ProbeResult) => void) => Promise<ProbeResult[]>
   neighbors: () => Promise<string[]>
@@ -42,6 +43,12 @@ export interface ClientDeps {
   pairSettleMs?: number
   /** Сколько связь должна быть нормальной, прежде чем снять пометку «плохая связь». */
   poorNetworkClearMs?: number
+  /** Автоподбор: сколько связь должна оставаться плохой, прежде чем снизить качество. */
+  autoLowerAfterMs?: number
+  /** Сколько ждать результата замера скорости (старый хост замер не поддерживает). */
+  speedTestTimeoutMs?: number
+  /** Подключён ли этот ПК к сети по Wi-Fi (для подсказок). */
+  wifi?: () => Promise<boolean>
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -102,6 +109,18 @@ export class ClientController extends EventEmitter {
   /** Поток закрыт ради перезапуска с новыми настройками: после выхода Moonlight сразу встаём в очередь. */
   private restartPending = false
   private poorTimer: NodeJS.Timeout | null = null
+  /** Код из ссылки-приглашения (для hello). */
+  private inviteCode: string | undefined
+  /** Качество, подобранное автоматически для текущего подключения. */
+  private auto: QualityProfile | null = null
+  /** Замер уже был в этом подключении (удачный или нет): при перезапусках не повторяем. */
+  private measured = false
+  private autoLowerTimer: NodeJS.Timeout | null = null
+  private lastAutoLower = 0
+  /** Автопереподключения после обрыва за последние минуты. */
+  private reconnects: number[] = []
+  private speed: { bytes: number; first: number; last: number; firstBytes: number; done?: (mbps?: number) => void } | null = null
+  private inputRequestTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly d: ClientDeps) {
     super()
@@ -174,7 +193,7 @@ export class ClientController extends EventEmitter {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg))
   }
 
-  async connect(rawAddress: string): Promise<void> {
+  async connect(rawAddress: string, opts: { inviteCode?: string } = {}): Promise<void> {
     const address = rawAddress.trim()
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return this.fail('host_unreachable', 'bad address')
     if (!this.d.moonlight.available) return this.fail('moonlight_missing')
@@ -186,6 +205,10 @@ export class ClientController extends EventEmitter {
     this.teardown()
     const attempt = ++this.attempt
     this.connectedAt = Date.now()
+    this.inviteCode = opts.inviteCode
+    this.auto = null
+    this.measured = false
+    this.reconnects = []
     this.set({
       phase: 'connecting',
       host: { address, name: this.hosts.get(address)?.name ?? address },
@@ -199,7 +222,15 @@ export class ClientController extends EventEmitter {
       selfOff: { ...NO_INPUT },
       hostChat: undefined,
       poorNetwork: false,
-      restarting: false
+      restarting: false,
+      reconnecting: false,
+      measuring: false,
+      speedMbps: undefined,
+      active: undefined,
+      autoLowered: false,
+      relaySuspect: false,
+      inputRequest: undefined,
+      inputPaused: false
     })
     this.selfOff = { ...NO_INPUT }
     this.rttSamples = []
@@ -226,12 +257,14 @@ export class ClientController extends EventEmitter {
         deviceId: s.deviceId,
         nickname: s.nickname,
         appVersion: this.d.appVersion,
-        trustToken: this.d.secrets.get().hostTokens[address]
+        trustToken: this.d.secrets.get().hostTokens[address],
+        inviteCode: this.inviteCode
       })
     })
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
       if (attempt !== this.attempt) return
       this.lastPong = Date.now()
+      if (isBinary) return this.onSpeedChunk(data as Buffer)
       const msg = parseHostMessage(data)
       if (msg) void this.onMessage(attempt, address, msg).catch((e) => this.log(`message ${msg.t}`, e))
     })
@@ -330,12 +363,27 @@ export class ClientController extends EventEmitter {
           const rtt = Math.max(0, Date.now() - msg.ts)
           this.rttSamples = [...this.rttSamples, rtt].slice(-10)
           const j = jitter(this.rttSamples)
-          if (rtt !== this.state.rttMs || j !== this.state.jitterMs) this.set({ rttMs: rtt, jitterMs: j })
+          const relay = relaySuspect(this.rttSamples, this.state.speedMbps)
+          if (rtt !== this.state.rttMs || j !== this.state.jitterMs || relay !== this.state.relaySuspect) {
+            this.set({ rttMs: rtt, jitterMs: j, relaySuspect: relay })
+          }
         }
         return
       case 'audioState':
         this.set({ hostChat: { control: msg.chatControl, excluded: msg.chatExcluded } })
         return
+      case 'inputRequestResult':
+        if (this.inputRequestTimer) clearTimeout(this.inputRequestTimer)
+        this.inputRequestTimer = null
+        if (msg.granted) return this.set({ inputRequest: undefined })
+        this.set({ inputRequest: 'denied' })
+        this.inputRequestTimer = setTimeout(() => this.set({ inputRequest: undefined }), 10_000)
+        return
+      case 'inputPaused':
+        this.set({ inputPaused: msg.paused })
+        return
+      case 'speedEnd':
+        return this.onSpeedEnd(msg.bytes)
     }
   }
 
@@ -359,11 +407,25 @@ export class ClientController extends EventEmitter {
     }, ms)
   }
 
-  /** Готовы к стриму: встаём в очередь запусков на хосте и ждём launchGo. */
+  /**
+   * Готовы к стриму: встаём в очередь запусков на хосте и ждём launchGo.
+   * С автоподбором качества сначала замеряем канал (один раз за подключение).
+   */
   private launch(attempt: number, address: string): void {
     this.clearTimer('pair')
     this.set({ phase: 'launching' })
     this.launchAddress = address
+    if (this.d.settings.get().stream.autoQuality && !this.measured) {
+      this.measured = true
+      void this.measure(attempt).then(() => {
+        if (attempt === this.attempt && this.state.phase === 'launching') this.requestLaunch(attempt)
+      })
+      return
+    }
+    this.requestLaunch(attempt)
+  }
+
+  private requestLaunch(attempt: number): void {
     this.send({ t: 'launchRequest' })
     // Ожидание своей очереди считается отдельно от запуска Moonlight.
     this.startTimer('queue', this.d.queueTimeoutMs ?? 120_000, attempt, () => {
@@ -383,10 +445,22 @@ export class ClientController extends EventEmitter {
       this.streamProc.kill()
       this.streamProc = null
     }
-    const settings = this.d.settings.get()
+    const stream = this.effectiveStream(address)
     const startedAt = Date.now()
-    const proc = this.d.moonlight.stream(address, settings.stream, this.d.nativeResolution?.(), this.state.policy)
+    const native = this.d.nativeResolution?.()
+    const proc = this.d.moonlight.stream(address, stream, native, this.state.policy)
     this.streamProc = proc
+    const params = streamParams(stream, native, this.state.policy)
+    this.set({
+      active: {
+        width: params.size?.[0] ?? 0,
+        height: params.size?.[1] ?? 0,
+        fps: params.fps,
+        bitrateKbps: params.bitrateKbps ?? 0,
+        auto: !!this.auto
+      }
+    })
+    void this.d.wifi?.().then((wifi) => attempt === this.attempt && this.state.wifi !== wifi && this.set({ wifi }))
     this.streamStartedAt = startedAt
     proc.onLine?.((line) => {
       const poor = parseConnectionStatus(line)
@@ -426,14 +500,25 @@ export class ClientController extends EventEmitter {
     if (streaming) {
       this.clearTimer('start')
       this.clearTimer('lost')
-      if (this.state.phase !== 'streaming' || this.state.restarting) {
-        this.set({ phase: 'streaming', startedAt: this.state.startedAt ?? Date.now(), restarting: false })
+      if (this.state.phase !== 'streaming' || this.state.restarting || this.state.reconnecting) {
+        this.set({ phase: 'streaming', startedAt: this.state.startedAt ?? Date.now(), restarting: false, reconnecting: false })
       }
       return
     }
     // Хост больше не видит стрим, а Moonlight ещё открыт (например, с окном «соединение потеряно»).
+    // Сначала пробуем переподключиться сами (до 2 раз за 3 минуты), потом показываем ошибку.
     this.startTimer('lost', this.d.streamLostGraceMs ?? 8000, attempt, () => {
-      if (this.state.phase === 'streaming') this.fail('connection_lost', this.d.moonlightLog?.(this.streamStartedAt))
+      if (this.state.phase !== 'streaming') return
+      const now = Date.now()
+      this.reconnects = this.reconnects.filter((t) => now - t < 180_000)
+      if (this.reconnects.length < 2 && this.ws?.readyState === WebSocket.OPEN && this.streamProc) {
+        this.reconnects.push(now)
+        this.log('stream lost: reconnecting')
+        this.set({ reconnecting: true })
+        this.restartStream(true)
+        return
+      }
+      this.fail('connection_lost', this.d.moonlightLog?.(this.streamStartedAt))
     })
   }
 
@@ -452,8 +537,101 @@ export class ClientController extends EventEmitter {
       this.set({ poorNetwork: v })
       this.send({ t: 'netStatus', poor: v })
     }
+    if (poor) this.scheduleAutoLower()
+    else if (this.autoLowerTimer) {
+      clearTimeout(this.autoLowerTimer)
+      this.autoLowerTimer = null
+    }
     if (poor || immediate) return apply(poor)
     this.poorTimer = setTimeout(() => apply(false), this.d.poorNetworkClearMs ?? 6000)
+  }
+
+  /** Автоподбор: если связь остаётся плохой, снижаем качество на ступень (не чаще раза в минуту). */
+  private scheduleAutoLower(): void {
+    if (this.autoLowerTimer || !this.d.settings.get().stream.autoQuality) return
+    const attempt = this.attempt
+    this.autoLowerTimer = setTimeout(() => {
+      this.autoLowerTimer = null
+      if (attempt !== this.attempt || !this.state.poorNetwork || this.state.phase !== 'streaming') return
+      if (Date.now() - this.lastAutoLower < 60_000) return this.scheduleAutoLower()
+      const base = this.d.settings.get().stream
+      const next = lowerProfile(this.auto ?? { resolution: base.resolution, fps: base.fps, bitrateKbps: this.state.active?.bitrateKbps ?? base.bitrateKbps }, base)
+      if (!next) return
+      this.auto = next
+      this.lastAutoLower = Date.now()
+      this.log(`auto quality: lowering to ${next.resolution} ${next.fps}fps ${next.bitrateKbps}kbps`)
+      this.set({ autoLowered: true })
+      this.restartStream()
+    }, this.d.autoLowerAfterMs ?? 15_000)
+  }
+
+  /** Настройки трансляции для этого хоста: автоподбор, своё качество хоста или общие настройки. */
+  private effectiveStream(address: string): StreamSettings {
+    const s = this.d.settings.get()
+    if (s.stream.autoQuality && this.auto) return { ...s.stream, ...this.auto }
+    return { ...s.stream, ...(s.hostQuality[address] ?? {}) }
+  }
+
+  /** Замер скорости канала от хоста: хост присылает несколько мегабайт, считаем время прихода. */
+  private measure(attempt: number): Promise<void> {
+    this.set({ measuring: true })
+    return new Promise<void>((resolve) => {
+      const finish = (mbps?: number): void => {
+        clearTimeout(timer)
+        this.speed = null
+        if (attempt !== this.attempt) return resolve()
+        const s = this.d.settings.get().stream
+        if (mbps && mbps > 0) {
+          this.auto = autoProfile(mbps, s, this.state.policy?.maxBitrateKbps ?? 0)
+          this.log(`speed test: ${mbps.toFixed(1)} Mbit/s -> ${this.auto.resolution} ${this.auto.fps}fps ${this.auto.bitrateKbps}kbps`)
+        }
+        this.set({ measuring: false, speedMbps: mbps ? Math.round(mbps) : undefined, relaySuspect: relaySuspect(this.rttSamples, mbps) })
+        resolve()
+      }
+      // Старый хост не отвечает на замер: через несколько секунд стартуем с обычными настройками.
+      const timer = setTimeout(() => finish(this.speedResult()), this.d.speedTestTimeoutMs ?? 6000)
+      this.speed = { bytes: 0, first: 0, last: 0, firstBytes: 0, done: finish }
+      this.send({ t: 'speedTest' })
+    })
+  }
+
+  private onSpeedChunk(chunk: Buffer): void {
+    const sp = this.speed
+    if (!sp) return
+    const now = performance.now()
+    if (!sp.first) {
+      // Первый кусок не считаем: в нём задержка сети, а не скорость.
+      sp.first = now
+      sp.firstBytes = chunk.length
+    }
+    sp.bytes += chunk.length
+    sp.last = now
+  }
+
+  private speedResult(): number | undefined {
+    const sp = this.speed
+    if (!sp || sp.last <= sp.first) return undefined
+    const bytes = sp.bytes - sp.firstBytes
+    if (bytes < 256 * 1024) return undefined
+    return (bytes * 8) / ((sp.last - sp.first) / 1000) / 1e6
+  }
+
+  private onSpeedEnd(bytes: number): void {
+    const sp = this.speed
+    if (!sp?.done) return
+    sp.done(bytes > 0 ? this.speedResult() : undefined)
+  }
+
+  /** Игрок просит у хоста ввод, который тот выключил. */
+  requestInput(perms: Partial<InputPerms>): void {
+    if (!this.admittedAt || this.state.inputRequest === 'pending') return
+    const want: InputPerms = { keyboard: !!perms.keyboard, mouse: !!perms.mouse, gamepad: !!perms.gamepad }
+    if (!want.keyboard && !want.mouse && !want.gamepad) return
+    if (this.inputRequestTimer) clearTimeout(this.inputRequestTimer)
+    this.set({ inputRequest: 'pending' })
+    this.send({ t: 'inputRequest', perms: want })
+    // Хост может так и не ответить: через минуту кнопку можно нажать снова.
+    this.inputRequestTimer = setTimeout(() => this.set({ inputRequest: undefined }), 60_000)
   }
 
   private sendPrefs(): void {
@@ -479,10 +657,10 @@ export class ClientController extends EventEmitter {
   }
 
   /** Перезапуск трансляции с текущими настройками (быстрые настройки качества). Одобрение хоста не нужно. */
-  restartStream(): boolean {
+  restartStream(silent = false): boolean {
     if (this.state.phase !== 'streaming' || !this.streamProc || !this.launchAddress) return false
     this.restartPending = true
-    this.set({ restarting: true })
+    if (!silent) this.set({ restarting: true })
     const proc = this.streamProc
     if (proc.close) proc.close()
     else proc.kill()
@@ -509,6 +687,12 @@ export class ClientController extends EventEmitter {
     this.restartPending = false
     if (this.poorTimer) clearTimeout(this.poorTimer)
     this.poorTimer = null
+    if (this.autoLowerTimer) clearTimeout(this.autoLowerTimer)
+    this.autoLowerTimer = null
+    if (this.inputRequestTimer) clearTimeout(this.inputRequestTimer)
+    this.inputRequestTimer = null
+    this.speed?.done?.()
+    this.speed = null
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.pingTimer = null
     for (const name of Object.keys(this.timers) as TimerName[]) this.clearTimer(name)

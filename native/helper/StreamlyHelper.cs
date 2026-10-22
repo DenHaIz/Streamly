@@ -117,6 +117,31 @@ namespace Streamly
                     }
                 case "devices":
                     return CoreAudio.ListRenderDevices();
+                case "netInfo":
+                    return NetInfo();
+                case "gpus":
+                    {
+                        // Видеокарты ПК: чтобы заметить, что видео кодирует встроенная графика, а не дискретная.
+                        var names = new List<object>();
+                        using (var q = new System.Management.ManagementObjectSearcher("SELECT Name FROM Win32_VideoController"))
+                        {
+                            foreach (System.Management.ManagementObject o in q.Get())
+                            {
+                                object n = o["Name"];
+                                if (n != null) names.Add(n.ToString());
+                                o.Dispose();
+                            }
+                        }
+                        return names;
+                    }
+                case "sendKeys":
+                    {
+                        // Сочетание клавиш окну процесса (например, статистика Moonlight: Ctrl+Alt+Shift+S).
+                        IntPtr h = Native.MainWindow(Int(c, "pid"));
+                        if (h == IntPtr.Zero || !Native.Activate(h)) return false;
+                        Thread.Sleep(120);
+                        return Native.SendCombo(Strings(c, "keys"));
+                    }
                 case "router":
                     router.Configure(Bool(c, "enabled"), Bool(c, "monitor"), Bool(c, "excludeChat"), Strings(c, "chatApps"), Strings(c, "virtualNames"));
                     return router.Snapshot();
@@ -133,6 +158,40 @@ namespace Streamly
                 default:
                     throw new ArgumentException("unknown command: " + cmd);
             }
+        }
+
+        /** Сетевые адаптеры: тип (Wi-Fi или кабель), адреса, шлюз и счётчики байт. */
+        static object NetInfo()
+        {
+            var list = new List<object>();
+            foreach (System.Net.NetworkInformation.NetworkInterface ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                var props = ni.GetIPProperties();
+                var addrs = new List<object>();
+                foreach (var a in props.UnicastAddresses)
+                {
+                    if (a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) addrs.Add(a.Address.ToString());
+                }
+                bool gateway = false;
+                foreach (var g in props.GatewayAddresses)
+                {
+                    if (g.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !g.Address.Equals(System.Net.IPAddress.Any)) gateway = true;
+                }
+                var stats = ni.GetIPStatistics();
+                var d = new Dictionary<string, object>();
+                d["name"] = ni.Name;
+                d["description"] = ni.Description;
+                d["wifi"] = ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211;
+                d["addresses"] = addrs;
+                d["gateway"] = gateway;
+                d["speedMbps"] = ni.Speed > 0 ? ni.Speed / 1000000 : 0;
+                d["sent"] = stats.BytesSent;
+                d["received"] = stats.BytesReceived;
+                list.Add(d);
+            }
+            return list;
         }
 
         /** Курсор в центр другого монитора; фокус — окну под курсором, чтобы Moonlight отпустил мышь. */
@@ -1118,6 +1177,51 @@ namespace Streamly
             var pt = new POINT { X = x, Y = y };
             IntPtr h = WindowFromPoint(pt);
             return h == IntPtr.Zero ? h : GetAncestor(h, 2);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        // INPUT для клавиатуры; union дополнен до размера MOUSEINPUT (32 байта на x64).
+        [StructLayout(LayoutKind.Sequential)]
+        struct INPUT
+        {
+            public uint type;
+            public KEYBDINPUT ki;
+            public uint pad1, pad2;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+        static ushort Vk(string key)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "ctrl": return 0x11;
+                case "alt": return 0x12;
+                case "shift": return 0x10;
+                default:
+                    if (key.Length == 1) return (ushort)char.ToUpperInvariant(key[0]);
+                    throw new ArgumentException("unknown key " + key);
+            }
+        }
+
+        /** Нажимает клавиши по порядку и отпускает в обратном (как сочетание). */
+        public static bool SendCombo(string[] keys)
+        {
+            if (keys.Length == 0) return false;
+            var inputs = new List<INPUT>();
+            foreach (string k in keys) inputs.Add(new INPUT { type = 1, ki = new KEYBDINPUT { wVk = Vk(k) } });
+            for (int i = keys.Length - 1; i >= 0; i--) inputs.Add(new INPUT { type = 1, ki = new KEYBDINPUT { wVk = Vk(keys[i]), dwFlags = 2 } });
+            INPUT[] arr = inputs.ToArray();
+            return SendInput((uint)arr.Length, arr, Marshal.SizeOf(typeof(INPUT))) == arr.Length;
         }
 
         /** Делает окно активным. Если Windows запрещает (окно другого процесса), подключаемся к его потоку ввода. */

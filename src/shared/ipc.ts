@@ -8,6 +8,7 @@ import type {
   DiscoveredHost,
   HostDisplay,
   HostState,
+  Invite,
   RadminStatus,
   Settings,
   TrustedFriendView
@@ -23,6 +24,8 @@ export interface BridgeEvents {
   hosts: DiscoveredHost[]
   /** Меню Alt+F2 открыто (screens — сколько мониторов у этого ПК). */
   overlay: { open: boolean; screens: number }
+  /** Открыта ссылка-приглашение (или найдена в буфере обмена). */
+  invite: Invite
 }
 
 export type BridgeEvent = keyof BridgeEvents
@@ -40,6 +43,8 @@ export interface StreamlyBridge {
   openLogs(): Promise<void>
   /** Скопировать отчёт для диагностики (версии, сеть, состояние, хвост лога) в буфер обмена. */
   copyDiagnostics(): Promise<void>
+  /** Ссылка-приглашение в буфере обмена (если есть и ещё не предлагалась). */
+  checkInvite(): Promise<Invite | null>
 
   host: {
     getState(): Promise<HostState>
@@ -61,13 +66,20 @@ export interface StreamlyBridge {
     removeTrusted(deviceId: string): Promise<void>
     /** Мониторы хоста (по логу Apollo; до первого запуска хоста список пуст). */
     listDisplays(): Promise<HostDisplay[]>
+    /** Ссылка-приглашение текущего сеанса хостинга (null — хост не запущен). */
+    createInvite(): Promise<{ link: string; expiresAt: number } | null>
+    /** Ответ на просьбу игрока выдать ввод. */
+    respondInput(deviceId: string, grant: boolean): Promise<void>
+    /** Забрать ввод у всех игроков (или вернуть). */
+    setInputPaused(paused: boolean): Promise<void>
   }
 
   client: {
     getState(): Promise<ClientState>
     discover(): Promise<void>
     getHosts(): Promise<DiscoveredHost[]>
-    connect(address: string): Promise<void>
+    /** inviteCode — код из ссылки-приглашения: хост пускает без подтверждения. */
+    connect(address: string, inviteCode?: string): Promise<void>
     /** Проверка связи с хостом по адресу: Radmin, ping, порты Streamly и Apollo. */
     diagnose(address: string): Promise<CheckReport>
     cancel(): Promise<void>
@@ -76,6 +88,8 @@ export interface StreamlyBridge {
     setSelfOff(patch: Partial<InputPerms>): Promise<void>
     /** Перезапустить трансляцию с текущими настройками качества. */
     restartStream(): Promise<boolean>
+    /** Попросить у хоста ввод, который он выключил. */
+    requestInput(perms: Partial<InputPerms>): Promise<void>
   }
 
   /** Меню во время игры (Alt+F2). */
@@ -84,6 +98,8 @@ export interface StreamlyBridge {
     close(): Promise<void>
     /** Курсор на другой монитор этого ПК (мышь отпускается из окна трансляции). */
     toOtherScreen(): Promise<boolean>
+    /** Включить или выключить подробную статистику Moonlight поверх трансляции. */
+    toggleStats(): Promise<boolean>
   }
 
   on<E extends BridgeEvent>(event: E, cb: (payload: BridgeEvents[E]) => void): () => void
@@ -100,6 +116,7 @@ export const IPC = {
   setTitleBar: 'app:titlebar',
   openLogs: 'app:openLogs',
   copyDiagnostics: 'app:diagnostics',
+  checkInvite: 'app:checkInvite',
   hostGetState: 'host:getState',
   hostStart: 'host:start',
   hostInstall: 'host:install',
@@ -114,6 +131,9 @@ export const IPC = {
   hostListTrusted: 'host:listTrusted',
   hostRemoveTrusted: 'host:removeTrusted',
   hostListDisplays: 'host:listDisplays',
+  hostCreateInvite: 'host:createInvite',
+  hostRespondInput: 'host:respondInput',
+  hostSetInputPaused: 'host:setInputPaused',
   clientGetState: 'client:getState',
   clientDiscover: 'client:discover',
   clientGetHosts: 'client:getHosts',
@@ -123,6 +143,8 @@ export const IPC = {
   clientReset: 'client:reset',
   clientSetSelfOff: 'client:setSelfOff',
   clientRestartStream: 'client:restartStream',
+  clientRequestInput: 'client:requestInput',
+  overlayToggleStats: 'overlay:toggleStats',
   overlayClose: 'overlay:close',
   overlayOtherScreen: 'overlay:otherScreen'
 } as const

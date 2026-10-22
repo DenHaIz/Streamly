@@ -29,6 +29,22 @@ export interface Rect {
   height: number
 }
 
+export interface NetAdapter {
+  name: string
+  description: string
+  wifi: boolean
+  addresses: string[]
+  gateway: boolean
+  speedMbps: number
+  sent: number
+  received: number
+}
+
+/** Адаптер, через который ПК выходит в сеть: со шлюзом и не виртуальный (Radmin, Tailscale, ZeroTier). */
+export function internetAdapter(list: NetAdapter[]): NetAdapter | undefined {
+  return list.find((a) => a.gateway && !/radmin|tailscale|zerotier|hamachi|vpn|virtual|hyper-v/i.test(`${a.name} ${a.description}`))
+}
+
 /** Голосовые чаты, которые убираются из трансляции (имена процессов без .exe). */
 export const CHAT_APPS = ['Discord', 'DiscordPTB', 'DiscordCanary']
 /** Виртуальные колонки, которые Apollo по умолчанию использует, когда звук не остаётся на хосте. */
@@ -145,6 +161,20 @@ export class Helper extends EventEmitter {
   /** Курсор на другой монитор и фокус на окно под ним (Moonlight отпускает мышь). */
   cursorToOtherScreen(pid: number): Promise<boolean> {
     return this.call<boolean>('cursorToOtherScreen', { pid })
+  }
+
+  /** Названия видеокарт (WMI Win32_VideoController). */
+  gpus(): Promise<string[]> {
+    return this.call<string[]>('gpus', {}, 8000)
+  }
+
+  netInfo(): Promise<NetAdapter[]> {
+    return this.call<NetAdapter[]>('netInfo')
+  }
+
+  /** Активирует окно процесса и нажимает сочетание клавиш (например, ['ctrl', 'alt', 'shift', 's']). */
+  sendKeys(pid: number, keys: string[]): Promise<boolean> {
+    return this.call<boolean>('sendKeys', { pid, keys })
   }
 
   async router(opts: RouterOptions): Promise<RouterState> {

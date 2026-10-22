@@ -1,8 +1,9 @@
-import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { effectivePerms, NO_INPUT, toApolloPerm, type InputPerms } from '@shared/perms'
 import {
+  makeInviteLink,
   parseClientMessage,
   PROTOCOL_VERSION,
   sanitizeNickname,
@@ -17,6 +18,8 @@ import type {
   ErrorCode,
   HostAudioState,
   HostDisplay,
+  HostEncoder,
+  HostSettings,
   HostState,
   JoinRequestView,
   PlayerStatus,
@@ -27,7 +30,8 @@ import type {
 import type { JoinDecision } from '@shared/ipc'
 import type { ApolloApi, ApolloClient } from '../apollo/api'
 import { ApolloError } from '../apollo/api'
-import { parseDisplayDevices } from '../apollo/displays'
+import { parseDisplayDevices, parseEncoder } from '../apollo/displays'
+import { AUTO_BITRATE_CAP_MAX, autoBitrateCap } from '@shared/quality'
 import type { RouterOptions, RouterState } from '../helper/helper'
 import type { ApolloInstallStatus, SetupOptions } from '../apollo/installer'
 import type { ElevatedResult } from '../../elevate'
@@ -94,6 +98,12 @@ export interface HostDeps {
   displaysCache?: { get(): HostDisplay[]; set(list: HostDisplay[]): void }
   /** Сколько ждать после ухода последнего игрока, прежде чем закрыть «Desktop» в Apollo. */
   idleCloseMs?: number
+  /** Сколько байт отправлено через сетевой адаптер с этим адресом (для исходящего потока хоста). */
+  sentBytes?: (address: string) => Promise<number | undefined>
+  /** Сколько действует ссылка-приглашение. */
+  inviteTtlMs?: number
+  /** Названия видеокарт ПК (для проверки, что видео кодирует дискретная, а не встроенная). */
+  gpus?: () => Promise<string[]>
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -119,6 +129,14 @@ interface Peer {
   /** Игрок просит убрать Discord из трансляции. */
   muteChat: boolean
   poorNetwork: boolean
+  /** Код из ссылки-приглашения. */
+  inviteCode?: string
+  viaInvite: boolean
+  /** Просьба выдать ввод (что именно просит). */
+  inputRequest?: InputPerms
+  /** После отказа повторная просьба не раньше этого времени. */
+  inputRequestBlockedUntil?: number
+  lastSpeedTest?: number
   /** Ограничение частоты сообщений (маркерное ведро). */
   tokens: number
   tokensAt: number
@@ -139,6 +157,51 @@ const BUCKET_RATE = 8
 const NOTIFY_EVERY_MS = 5000
 /** Доля избыточных пакетов (FEC), %. Apollo по умолчанию — 20. */
 const FEC = { normal: 20, high: 30 } as const
+/**
+ * Пресеты кодировщика. Apollo по умолчанию — самый быстрый (NVENC P1): на RTX 40/50 запас огромный,
+ * и P3 даёт заметно более чистую картинку при почти той же задержке. Двухпроходное кодирование
+ * в четверть разрешения оставляем (как в Apollo): оно держит размер кадров ровным, без всплесков в сети.
+ * AMD (amd_usage остаётся ultralowlatency) и Intel получают аналогичные ступени.
+ */
+const ENCODER_PRESETS = {
+  latency: { nvenc_preset: '1', nvenc_spatial_aq: 'disabled', amd_quality: 'speed', qsv_preset: 'veryfast', sw_preset: 'ultrafast' },
+  balanced: { nvenc_preset: '3', nvenc_spatial_aq: 'disabled', amd_quality: 'balanced', qsv_preset: 'fast', sw_preset: 'superfast' },
+  quality: { nvenc_preset: '5', nvenc_spatial_aq: 'enabled', amd_quality: 'quality', qsv_preset: 'medium', sw_preset: 'veryfast' }
+} as const
+
+/** Параметры Apollo для выбранного пресета кодировщика или ручной настройки. */
+function encoderConfig(h: HostSettings): Record<string, string> {
+  if (h.encoderPreset !== 'custom') {
+    return {
+      ...ENCODER_PRESETS[h.encoderPreset],
+      nvenc_twopass: 'quarter_res',
+      amd_usage: 'ultralowlatency',
+      amd_rc: 'vbr_latency',
+      amd_preanalysis: 'disabled',
+      amd_vbaq: 'enabled',
+      min_threads: '2'
+    }
+  }
+  const c = h.encoderCustom
+  const onOff = (v: boolean): string => (v ? 'enabled' : 'disabled')
+  return {
+    nvenc_preset: String(c.nvPreset),
+    nvenc_twopass: c.nvTwoPass,
+    nvenc_spatial_aq: onOff(c.nvSpatialAq),
+    amd_usage: c.amdUsage,
+    amd_quality: c.amdQuality,
+    amd_rc: c.amdRc,
+    amd_preanalysis: onOff(c.amdPreanalysis),
+    amd_vbaq: onOff(c.amdVbaq),
+    qsv_preset: c.qsvPreset,
+    sw_preset: c.swPreset,
+    min_threads: String(c.swThreads)
+  }
+}
+/** Замер скорости: столько данных хост присылает игроку (кусками по 64 КБ) и не чаще раза в 20 с на игрока. */
+const SPEED_TEST_BYTES = 4 * 1024 * 1024
+const SPEED_CHUNK = randomBytes(64 * 1024)
+const SPEED_TEST_EVERY_MS = 20_000
 
 /** Остановка хоста во время асинхронной операции: дальше ничего не делаем. */
 class Cancelled extends Error {}
@@ -185,6 +248,13 @@ export class HostController extends EventEmitter {
   /** Когда Apollo последний раз видел хоть один поток (для закрытия «Desktop» после ухода всех). */
   private lastStreamAt = 0
   private appOpen = false
+  private encoder?: HostEncoder
+  private gpuNames: string[] = []
+  /** Ссылка-приглашение текущего сеанса хостинга. */
+  private invite: { code: string; expiresAt: number } | null = null
+  /** Хост временно забрал ввод у всех. */
+  private inputPaused = false
+  private upload: { bytes: number; at: number; mbps?: number } | null = null
 
   constructor(private readonly d: HostDeps) {
     super()
@@ -216,7 +286,9 @@ export class HostController extends EventEmitter {
           rttMs: p.rttMs,
           selfOff: p.selfOff,
           muteChat: p.muteChat,
-          poorNetwork: p.poorNetwork
+          poorNetwork: p.poorNetwork,
+          inputRequest: p.inputRequest,
+          viaInvite: p.viaInvite
         })
       } else if (p.requestId) {
         requests.push({
@@ -241,7 +313,11 @@ export class HostController extends EventEmitter {
       requests,
       gamepadDriver: this.gamepadDriver,
       audio: this.audioView(),
-      pendingRestart: this.pendingRestart
+      pendingRestart: this.pendingRestart,
+      encoder: this.encoder,
+      wrongGpu: this.wrongGpu(),
+      uploadMbps: this.phase === 'running' ? this.upload?.mbps : undefined,
+      inputPaused: this.inputPaused
     }
   }
 
@@ -476,9 +552,10 @@ export class HostController extends EventEmitter {
       dd_configuration_option: virtual ? (h.virtualOnly ? 'ensure_only_display' : 'ensure_primary') : 'disabled',
       output_name: virtual || h.display === 'primary' ? '' : h.display,
       // Потолок битрейта на игрока: Apollo кодирует каждому отдельный поток, а исходящий канал хоста общий.
-      max_bitrate: String(h.maxBitrateKbps),
+      max_bitrate: String(h.maxBitrateKbps === -1 ? AUTO_BITRATE_CAP_MAX : h.maxBitrateKbps),
       // Избыточные пакеты: потеря части пакетов восстанавливается без пропуска кадра.
-      fec_percentage: String(FEC[h.lossProtection])
+      fec_percentage: String(FEC[h.lossProtection]),
+      ...encoderConfig(h)
     }
   }
 
@@ -486,17 +563,38 @@ export class HostController extends EventEmitter {
     return JSON.stringify(this.apolloConfig())
   }
 
-  /** Мониторы хоста из лога Apollo (он перечисляет их с id при запуске). */
+  /** Мониторы и кодировщик хоста из лога Apollo (он пишет их при запуске). */
   private async refreshDisplays(): Promise<void> {
     try {
-      const list = parseDisplayDevices(await this.d.apollo.getLogs())
+      const log = await this.d.apollo.getLogs()
+      const list = parseDisplayDevices(log)
       if (list.length) {
         this.displays = list
         this.d.displaysCache?.set(list)
       }
+      if (this.d.gpus && !this.gpuNames.length) this.gpuNames = await this.d.gpus().catch(() => [])
+      const enc = parseEncoder(log)
+      if (enc) {
+        if (enc.vendor === 'software' && this.encoder?.vendor !== 'software') this.log('video is encoded on the CPU (no hardware encoder found)')
+        this.encoder = enc
+      }
     } catch (e) {
       this.log('displays', e instanceof Error ? e.message : e)
     }
+  }
+
+  /**
+   * Видео кодирует не лучшая видеокарта. Типичный случай — Ryzen со встроенной графикой и RTX:
+   * монитор подключён к материнской плате, и Apollo кодирует на встроенном AMD (или на процессоре).
+   */
+  private wrongGpu(): HostState['wrongGpu'] {
+    const enc = this.encoder
+    if (!enc) return undefined
+    const nvidia = this.gpuNames.find((n) => /nvidia|geforce|rtx|gtx/i.test(n))
+    const radeon = this.gpuNames.find((n) => /radeon rx|radeon pro/i.test(n))
+    if (nvidia && enc.vendor !== 'nvenc') return { encoderVendor: enc.vendor, better: nvidia }
+    if (!nvidia && radeon && (enc.vendor === 'software' || enc.vendor === 'quicksync')) return { encoderVendor: enc.vendor, better: radeon }
+    return undefined
   }
 
   listDisplays(): HostDisplay[] {
@@ -723,6 +821,9 @@ export class HostController extends EventEmitter {
     await this.updateAudio(false)
     this.appOpen = false
     this.pendingRestart = false
+    this.invite = null
+    this.inputPaused = false
+    this.upload = null
     // Служба Apollo нужна только на время хостинга: после перезагрузки ПК она сама не запустится.
     if (wasActive && this.serviceControl) await this.d.installer.stopService().catch(() => false)
     this.starting = false
@@ -762,7 +863,7 @@ export class HostController extends EventEmitter {
     const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
     try {
       if (perms && gen !== this.gen) return
-      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(effectivePerms(perms, peer?.selfOff)) : 0)
+      await this.d.apollo.setPerm(uuid, perms ? toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(perms, peer?.selfOff)) : 0)
       if (!perms) await this.d.apollo.disconnect(uuid)
     } catch (e) {
       this.log(`applyPerms ${deviceId}`, e)
@@ -798,7 +899,7 @@ export class HostController extends EventEmitter {
         p.status = next
         changed = true
       }
-      const want = toApolloPerm(effectivePerms(f.perms, p.selfOff))
+      const want = toApolloPerm(this.inputPaused ? NO_INPUT : effectivePerms(f.perms, p.selfOff))
       if (c.perm !== want && gen === this.gen) await this.d.apollo.setPerm(c.uuid, want).catch(() => undefined)
     }
     for (const c of clients) {
@@ -807,8 +908,24 @@ export class HostController extends EventEmitter {
       if (c.connected) await this.d.apollo.disconnect(c.uuid).catch(() => undefined)
     }
     this.pumpLaunches()
+    if (await this.measureUpload()) changed = true
     if (changed) this.emitState()
     await this.idleCheck(clients.some((c) => c.connected && known.has(c.uuid)), gen)
+  }
+
+  /** Исходящий поток хоста по счётчику адаптера Radmin. true — значение заметно изменилось. */
+  private async measureUpload(): Promise<boolean> {
+    const address = this.d.address()
+    if (!this.d.sentBytes || !address) return false
+    const bytes = await this.d.sentBytes(address).catch(() => undefined)
+    if (bytes === undefined) return false
+    const now = Date.now()
+    const prev = this.upload
+    this.upload = { bytes, at: now, mbps: prev?.mbps }
+    if (!prev || now <= prev.at || bytes < prev.bytes) return false
+    const mbps = Math.round(((bytes - prev.bytes) * 8) / ((now - prev.at) / 1000) / 1e5) / 10
+    this.upload.mbps = mbps
+    return prev.mbps === undefined || Math.abs(mbps - prev.mbps) >= 0.5
   }
 
   /**
@@ -867,6 +984,7 @@ export class HostController extends EventEmitter {
       selfOff: { ...NO_INPUT },
       muteChat: false,
       poorNetwork: false,
+      viaInvite: false,
       tokens: BUCKET_SIZE,
       tokensAt: Date.now()
     }
@@ -927,6 +1045,7 @@ export class HostController extends EventEmitter {
       peer.deviceId = msg.deviceId
       peer.nickname = sanitizeNickname(msg.nickname)
       peer.trustToken = msg.trustToken
+      peer.inviteCode = msg.inviteCode
       return this.send(peer, {
         t: 'hostInfo',
         v: PROTOCOL_VERSION,
@@ -950,6 +1069,13 @@ export class HostController extends EventEmitter {
         }
         const f = this.friend(deviceId)
         if (!this.kicked.has(deviceId) && f?.trusted && f.tokenHash && peer.trustToken && sha256(peer.trustToken) === f.tokenHash) {
+          return this.admit(peer, false)
+        }
+        // Ссылка-приглашение хоста: входит без подтверждения (если это не выключено в настройках).
+        if (!this.kicked.has(deviceId) && this.validInvite(peer.inviteCode) && this.d.settings.get().host.inviteAutoAdmit) {
+          peer.viaInvite = true
+          this.log(`${peer.nickname} joined with the invite link`)
+          this.emit('inviteJoin', { nickname: peer.nickname })
           return this.admit(peer, false)
         }
         // Если тот же друг уже ждёт подтверждения с другого соединения, новый запрос заменяет старый.
@@ -1007,6 +1133,37 @@ export class HostController extends EventEmitter {
         if (chatChanged && peer.admitted) await this.updateAudio()
         return this.emitState()
       }
+      case 'inputRequest': {
+        if (!peer.admitted) return
+        if ((peer.inputRequestBlockedUntil ?? 0) > Date.now()) return this.send(peer, { t: 'inputRequestResult', granted: false })
+        const granted = this.friend(peer.deviceId)?.perms
+        if (!granted) return
+        // Просить можно только то, что хост выключил.
+        const want: InputPerms = {
+          keyboard: msg.perms.keyboard && !granted.keyboard,
+          mouse: msg.perms.mouse && !granted.mouse,
+          gamepad: msg.perms.gamepad && !granted.gamepad
+        }
+        if (!want.keyboard && !want.mouse && !want.gamepad) return this.send(peer, { t: 'inputRequestResult', granted: true })
+        const first = !peer.inputRequest
+        peer.inputRequest = {
+          keyboard: want.keyboard || !!peer.inputRequest?.keyboard,
+          mouse: want.mouse || !!peer.inputRequest?.mouse,
+          gamepad: want.gamepad || !!peer.inputRequest?.gamepad
+        }
+        if (first) this.emit('inputRequest', { nickname: peer.nickname, perms: peer.inputRequest })
+        return this.emitState()
+      }
+      case 'speedTest': {
+        if (!peer.admitted || Date.now() - (peer.lastSpeedTest ?? 0) < SPEED_TEST_EVERY_MS) return this.send(peer, { t: 'speedEnd', bytes: 0 })
+        peer.lastSpeedTest = Date.now()
+        // Без сжатия и подряд: клиент считает скорость по времени прихода кусков.
+        for (let sent = 0; sent < SPEED_TEST_BYTES; sent += SPEED_CHUNK.length) {
+          if (peer.ws.readyState !== peer.ws.OPEN) return
+          peer.ws.send(SPEED_CHUNK, { binary: true })
+        }
+        return this.send(peer, { t: 'speedEnd', bytes: SPEED_TEST_BYTES })
+      }
       case 'netStatus':
         if (peer.admitted && peer.poorNetwork !== msg.poor) {
           peer.poorNetwork = msg.poor
@@ -1042,10 +1199,12 @@ export class HostController extends EventEmitter {
     return {
       // Через виртуальные колонки: Apollo захватывает их, а хост слышит игру через повтор помощника.
       hostAudio: this.routingMode ? false : h.keepHostAudio,
-      maxBitrateKbps: h.maxBitrateKbps,
+      // «Авто»: потолок зависит от числа игроков на момент допуска (вместе с этим игроком).
+      maxBitrateKbps: h.maxBitrateKbps === -1 ? autoBitrateCap(this.admittedCount) : h.maxBitrateKbps,
       hostWidth: mode?.width ?? 0,
       hostHeight: mode?.height ?? 0,
-      hostFps: mode?.fps ?? 0
+      hostFps: mode?.fps ?? 0,
+      encoder: this.encoder
     }
   }
 
@@ -1145,6 +1304,7 @@ export class HostController extends EventEmitter {
     this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy() })
     const audio = this.audioView()
     this.send(peer, { t: 'audioState', chatControl: audio.chatControl, chatExcluded: audio.chatExcluded })
+    if (this.inputPaused) this.send(peer, { t: 'inputPaused', paused: true })
     if (peer.muteChat) await this.updateAudio()
     this.emitState()
   }
@@ -1253,8 +1413,64 @@ export class HostController extends EventEmitter {
     if (peer) {
       await this.applyPerms(deviceId, clean)
       this.send(peer, { t: 'permissionsChanged', perms: clean })
+      // Хост сам выдал то, о чём просили: просьба выполнена.
+      const req = peer.inputRequest
+      if (req && (!req.keyboard || clean.keyboard) && (!req.mouse || clean.mouse) && (!req.gamepad || clean.gamepad)) {
+        peer.inputRequest = undefined
+        this.send(peer, { t: 'inputRequestResult', granted: true })
+      }
     }
     this.emitState()
+  }
+
+  /** Ответ на просьбу игрока выдать ввод. Отказ — повторная просьба не раньше чем через 30 с. */
+  async respondInput(deviceId: string, grant: boolean): Promise<void> {
+    const peer = [...this.peers.values()].find((p) => p.deviceId === deviceId && p.admitted)
+    const req = peer?.inputRequest
+    if (!peer || !req) return
+    peer.inputRequest = undefined
+    if (grant) {
+      const patch: Partial<InputPerms> = {}
+      for (const k of ['keyboard', 'mouse', 'gamepad'] as const) if (req[k]) patch[k] = true
+      await this.setPerms(deviceId, patch)
+      this.send(peer, { t: 'inputRequestResult', granted: true })
+    } else {
+      peer.inputRequestBlockedUntil = Date.now() + 30_000
+      this.send(peer, { t: 'inputRequestResult', granted: false })
+    }
+    this.emitState()
+  }
+
+  /** Забрать ввод у всех игроков разом (и вернуть). Выданные права при этом не меняются. */
+  async setInputPaused(paused: boolean): Promise<void> {
+    if (this.phase !== 'running' || this.inputPaused === paused) return
+    this.inputPaused = paused
+    this.log(paused ? 'input paused for everyone' : 'input resumed')
+    for (const p of [...this.peers.values()]) {
+      if (!p.admitted || !p.deviceId) continue
+      const f = this.friend(p.deviceId)
+      if (f?.apolloUuid) await this.applyPerms(p.deviceId, f.perms)
+      this.send(p, { t: 'inputPaused', paused })
+    }
+    this.emitState()
+  }
+
+  /** Ссылка-приглашение: одна на сеанс хостинга, действует 12 часов (или до остановки хоста). */
+  createInvite(): { link: string; expiresAt: number } | null {
+    const address = this.d.address()
+    if (this.phase !== 'running' || !address) return null
+    if (!this.invite || this.invite.expiresAt < Date.now()) {
+      this.invite = { code: randomBytes(12).toString('base64url'), expiresAt: Date.now() + (this.d.inviteTtlMs ?? 12 * 3600_000) }
+    }
+    return { link: makeInviteLink(address, this.d.settings.get().nickname, this.invite.code), expiresAt: this.invite.expiresAt }
+  }
+
+  private validInvite(code: string | undefined): boolean {
+    const inv = this.invite
+    if (!code || !inv || inv.expiresAt < Date.now()) return false
+    const a = Buffer.from(code)
+    const b = Buffer.from(inv.code)
+    return a.length === b.length && timingSafeEqual(a, b)
   }
 
   /** Ставит драйвер геймпадов ViGEmBus скриптом Apollo (одно окно UAC), если тихая установка его не поставила. */
@@ -1307,6 +1523,10 @@ export class HostController extends EventEmitter {
       }
     }
     add('hosting', hosting ? 'ok' : 'warn', 'hosting')
+    if (this.encoder) {
+      const wrong = this.wrongGpu()
+      add('encoder', this.encoder.vendor === 'software' || wrong ? 'warn' : 'ok', wrong ? 'wrongGpu' : 'softwareEncoder', wrong ? `${this.encoder.vendor} → ${wrong.better}` : this.encoder.vendor)
+    }
     const h = this.d.settings.get().host
     add('audio', h.keepHostAudio ? 'ok' : 'warn', 'hostAudio')
     if (hosting) {

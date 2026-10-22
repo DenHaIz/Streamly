@@ -9,6 +9,7 @@ import { IconButton, spring } from '@/components/ui'
 import { RadminBadge } from '@/components/RadminBadge'
 import { PixelLogo } from '@/components/PixelLogo'
 import { DiagnosticsModal } from '@/components/Diagnostics'
+import { InviteModal } from '@/components/InviteModal'
 import { Onboarding } from '@/screens/Onboarding'
 import { Home } from '@/screens/Home'
 import { Host } from '@/screens/Host'
@@ -128,6 +129,11 @@ function Toasts() {
 function useGlobalNotifications(): void {
   const { t } = useTranslation()
   const requests = useApp((s) => s.host?.requests)
+  const players = useApp((s) => s.host?.players)
+  const inputRequest = useApp((s) => s.client.inputRequest)
+  const inputPaused = useApp((s) => s.client.inputPaused)
+  const seenInput = useRef(new Set<string>())
+  const prevInputRequest = useRef<string | undefined>(undefined)
   const perms = useApp((s) => s.client.perms)
   const phase = useApp((s) => s.client.phase)
   const seenRequests = useRef(new Set<string>())
@@ -143,6 +149,30 @@ function useGlobalNotifications(): void {
       }
     }
   }, [requests, t])
+
+  useEffect(() => {
+    const { screen, toast, go } = useApp.getState()
+    for (const p of players ?? []) {
+      const key = p.inputRequest ? `${p.deviceId}:${Object.entries(p.inputRequest).filter(([, v]) => v).map(([k]) => k).join(',')}` : ''
+      if (!key || seenInput.current.has(key)) continue
+      seenInput.current.add(key)
+      if (screen !== 'host') toast({ tone: 'info', text: t('host.inputRequestToast', { name: p.nickname }), action: { label: t('home.open'), run: () => go('host') } }, 10_000)
+    }
+  }, [players, t])
+
+  useEffect(() => {
+    const prev = prevInputRequest.current
+    prevInputRequest.current = inputRequest
+    if (prev === 'pending' && inputRequest === 'denied') useApp.getState().toast({ tone: 'warning', text: t('stream.requestDenied') })
+  }, [inputRequest, t])
+
+  const prevPaused = useRef(false)
+  useEffect(() => {
+    const was = prevPaused.current
+    prevPaused.current = !!inputPaused
+    if (was === !!inputPaused) return
+    useApp.getState().toast({ tone: inputPaused ? 'warning' : 'success', text: inputPaused ? t('stream.pausedByHost') : t('stream.resumedByHost') })
+  }, [inputPaused, t])
 
   useEffect(() => {
     const prev = prevPerms.current
@@ -189,6 +219,7 @@ export function App() {
       </main>
       <Toasts />
       <DiagnosticsModal />
+      <InviteModal />
     </div>
     </MotionConfig>
   )

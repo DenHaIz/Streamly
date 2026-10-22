@@ -25,8 +25,8 @@ Streamly ставит и настраивает Apollo, сопрягает Moonl
 |---|---|
 | Версия | **0.2** (в `package.json` — `0.2.0`) |
 | Релиз | https://github.com/DenHaIz/Streamly/releases/tag/v0.2 (тег `v0.2`) |
-| Установщик | `Streamly-Setup-0.2.exe`, 157,6 МБ, SHA-256 `ef4236ec4c9fd32a8243cad1274619087b9fddddee980874d50e4f44e95d2fe4` |
-| Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.2.exe |
+| Установщик | `Streamly-Setup-0.3.exe`, 157,6 МБ, SHA-256 `ef4236ec4c9fd32a8243cad1274619087b9fddddee980874d50e4f44e95d2fe4` |
+| Прямая ссылка | https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.3.exe |
 | Прошлый релиз | 0.1: https://github.com/DenHaIz/Streamly/releases/tag/v0.1 |
 | В комплекте | Apollo 0.4.6 (SHA-256 `42b2aefa…f5021a`), Moonlight-qt 6.2.0 (подпись Cameron Gutman действительна), StreamlyHelper (свой, `native/helper`) |
 | Тесты | 53, все проходят |

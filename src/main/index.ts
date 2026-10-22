@@ -18,10 +18,11 @@ import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync 
 import { join } from 'node:path'
 import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision } from '@shared/ipc'
 import type { InputPerms } from '@shared/perms'
-import type { ClientState, DeepPartial, HostDisplay, HostState, RadminStatus, Settings } from '@shared/types'
+import type { ClientState, DeepPartial, HostDisplay, HostState, Invite, RadminStatus, Settings } from '@shared/types'
+import { parseInviteLink } from '@shared/protocol'
 import { SecretsService, SettingsService } from './settings'
 import { JsonFile, type Cipher } from './store'
-import { Helper } from './services/helper/helper'
+import { Helper, internetAdapter } from './services/helper/helper'
 import { ApolloApi } from './services/apollo/api'
 import { ApolloInstaller } from './services/apollo/installer'
 import { HostController } from './services/host/controller'
@@ -39,6 +40,15 @@ if (!primaryInstance) {
   app.quit()
   process.exit(0)
 }
+
+// Ссылки streamly://join/... открывают Streamly (в установленной версии; установщик тоже регистрирует схему).
+if (app.isPackaged) app.setAsDefaultProtocolClient('streamly')
+/** Приглашение, с которым Streamly запустили (ссылка в аргументах), — отдаётся интерфейсу при старте. */
+let pendingInvite: Invite | null = parseInviteLink(process.argv.join(' '))
+/** Текст буфера обмена, приглашение из которого уже предлагали (чтобы не спрашивать дважды). */
+let offeredClipboard = ''
+/** Горячая клавиша хоста: забрать ввод у всех игроков и вернуть. */
+const PAUSE_KEY = 'Alt+F12'
 
 /** Адрес для отладки без Radmin (например, IP в обычной локальной сети). */
 const DEV_IP = process.env.STREAMLY_DEV_IP
@@ -213,6 +223,11 @@ void app.whenReady().then(() => {
     },
     portOpen: async (h, p) => (await probePort(h, p, 1500)) === 'open',
     audio: helper,
+    gpus: async () => (helper.available ? helper.gpus() : []),
+    sentBytes: async (address) => {
+      if (!helper.available) return undefined
+      return (await helper.netInfo()).find((a) => a.addresses.includes(address))?.sent
+    },
     displaysCache: (() => {
       const file = new JsonFile<{ list: HostDisplay[] }>(join(dataDir, 'displays.json'), () => ({ list: [] }))
       return {
@@ -231,11 +246,12 @@ void app.whenReady().then(() => {
     appVersion,
     nativeResolution: () => {
       const d = screen.getPrimaryDisplay()
-      return { width: Math.round(d.size.width * d.scaleFactor), height: Math.round(d.size.height * d.scaleFactor) }
+      return { width: Math.round(d.size.width * d.scaleFactor), height: Math.round(d.size.height * d.scaleFactor), fps: Math.round(d.displayFrequency || 60) }
     },
     probe: (targets, onFound) => probeHosts({ localIp: radmin.ip, targets, broadcast: !!radmin.ip, onFound }),
     neighbors: () => (radmin.ip ? radminNeighbors(radmin.ip) : Promise.resolve([])),
     moonlightLog: (since) => moonlight.logTail(since),
+    wifi: async () => (helper.available ? !!internetAdapter(await helper.netInfo())?.wifi : false),
     log
   })
 
@@ -259,6 +275,31 @@ void app.whenReady().then(() => {
       n.show()
     }
   })
+  // Вход по приглашению и просьбы об управлении: хост мог отвлечься на игру, поэтому уведомление Windows.
+  const hostNotify = (ru: string, en: string, always = false): void => {
+    if ((!always && win?.isFocused()) || !settings.get().host.notifyRequests || !Notification.isSupported()) return
+    const n = new Notification({ title: 'Streamly', body: settings.get().language === 'ru' ? ru : en })
+    n.on('click', showWindow)
+    n.show()
+  }
+  host.on('inviteJoin', ({ nickname }: { nickname: string }) => hostNotify(`${nickname} вошёл по приглашению`, `${nickname} joined with your invite`))
+  host.on('inputRequest', ({ nickname }: { nickname: string }) => {
+    win?.flashFrame(true)
+    hostNotify(`${nickname} просит управление`, `${nickname} asks for control`, true)
+  })
+  // Пауза управления у всех — горячей клавишей, пока идёт хостинг.
+  let pauseKeyOn = false
+  host.on('state', (s: HostState) => {
+    const want = s.phase === 'running'
+    if (want && !pauseKeyOn) {
+      pauseKeyOn = globalShortcut.register(PAUSE_KEY, () => void host.setInputPaused(!host.getState().inputPaused))
+      if (!pauseKeyOn) log(`[host] ${PAUSE_KEY} is taken by another program`)
+    } else if (!want && pauseKeyOn) {
+      globalShortcut.unregister(PAUSE_KEY)
+      pauseKeyOn = false
+    }
+  })
+
   client.on('state', (s: ClientState) => {
     broadcast('clientState', s)
     log(`[client] ${s.phase} host=${s.host?.address ?? '-'}${s.error ? ` error=${s.error}` : ''}${s.errorDetail ? ` (${s.errorDetail})` : ''}`)
@@ -361,7 +402,16 @@ void app.whenReady().then(() => {
         { label: status, enabled: false },
         { type: 'separator' },
         { label: ru ? 'Открыть Streamly' : 'Open Streamly', click: showWindow },
-        ...(hosting ? [{ label: ru ? 'Остановить хост' : 'Stop hosting', click: () => void host.stop() }] : []),
+        ...(hosting
+          ? [
+              {
+                label: hs.inputPaused ? (ru ? 'Вернуть управление игрокам' : 'Give control back') : ru ? 'Забрать управление у всех' : 'Take control from everyone',
+                accelerator: PAUSE_KEY,
+                click: () => void host.setInputPaused(!hs.inputPaused)
+              },
+              { label: ru ? 'Остановить хост' : 'Stop hosting', click: () => void host.stop() }
+            ]
+          : []),
         ...(cs.phase === 'streaming' ? [{ label: ru ? 'Отключиться' : 'Disconnect', click: () => void client.cancel() }] : []),
         { type: 'separator' },
         { label: ru ? 'Выход' : 'Quit', click: () => app.quit() }
@@ -409,6 +459,20 @@ void app.whenReady().then(() => {
   })
   handle(IPC.copyText, (text: string) => clipboard.writeText(String(text).slice(0, 2000)))
   handle(IPC.openLogs, () => shell.openPath(dataDir))
+  handle(IPC.checkInvite, async () => {
+    if (pendingInvite) {
+      const inv = pendingInvite
+      pendingInvite = null
+      return inv
+    }
+    // Discord не делает ссылки streamly:// кликабельными: приглашение, скопированное в буфер, Streamly замечает сам.
+    const text = String(await clipboard.readText()).slice(0, 2000)
+    const inv = parseInviteLink(text)
+    // Своё же приглашение (хост скопировал его друзьям) не предлагаем.
+    if (!inv || text === offeredClipboard || inv.address === radmin.ip) return null
+    offeredClipboard = text
+    return inv
+  })
   handle(IPC.copyDiagnostics, () => {
     let tail = ''
     try {
@@ -452,7 +516,22 @@ void app.whenReady().then(() => {
   handle(IPC.clientGetState, () => client.getState())
   handle(IPC.clientDiscover, () => client.discover())
   handle(IPC.clientGetHosts, () => client.getHosts())
-  handle(IPC.clientConnect, (address: string) => client.connect(String(address)))
+  handle(IPC.clientConnect, (address: string, inviteCode?: string) =>
+    client.connect(String(address), { inviteCode: typeof inviteCode === 'string' && /^[\w-]{8,64}$/.test(inviteCode) ? inviteCode : undefined })
+  )
+  handle(IPC.clientRequestInput, (perms: Partial<InputPerms>) =>
+    client.requestInput({ keyboard: perms?.keyboard === true, mouse: perms?.mouse === true, gamepad: perms?.gamepad === true })
+  )
+  handle(IPC.hostCreateInvite, () => host.createInvite())
+  handle(IPC.hostRespondInput, (id: string, grant: boolean) => host.respondInput(String(id), grant === true))
+  handle(IPC.hostSetInputPaused, (paused: boolean) => host.setInputPaused(paused === true))
+  handle(IPC.overlayToggleStats, async () => {
+    const pid = client.streamPid
+    if (!pid || !helper.available) return false
+    // Статистику показывает сам Moonlight (Ctrl+Alt+Shift+S): возвращаем ему фокус и нажимаем сочетание.
+    hideOverlay(false)
+    return helper.sendKeys(pid, ['ctrl', 'alt', 'shift', 's']).catch(() => false)
+  })
   handle(IPC.clientDiagnose, async (address: string) => {
     const a = String(address).trim()
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) return { target: a, items: [], summary: 'badAddress' }
@@ -498,7 +577,11 @@ void app.whenReady().then(() => {
     if (settings.get().host.autoStartHosting && (radmin.connected || DEV_IP)) void host.start()
   })
 
-  app.on('second-instance', showWindow)
+  app.on('second-instance', (_e, argv) => {
+    showWindow()
+    const inv = parseInviteLink(argv.join(' '))
+    if (inv) broadcast('invite', inv)
+  })
 
   // Перед выходом снимаем права у всех и закрываем стримы.
   app.on('before-quit', (e) => {

@@ -3,7 +3,8 @@ import { EventEmitter } from 'node:events'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { sanitizeNickname } from '@shared/protocol'
-import { DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type Settings } from '@shared/types'
+import { DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type EncoderCustom, type QualityProfile, type Settings } from '@shared/types'
+import { migratePreset } from '@shared/quality'
 import { deepMerge, JsonFile, type Cipher } from './store'
 import type { InputPerms } from '@shared/perms'
 
@@ -20,6 +21,46 @@ function normalizePerms(p: Partial<InputPerms> | undefined, fb: InputPerms): Inp
   return { keyboard: bool(p?.keyboard, fb.keyboard), mouse: bool(p?.mouse, fb.mouse), gamepad: bool(p?.gamepad, fb.gamepad) }
 }
 
+const RESOLUTIONS = ['auto', '720', '1080', '1440', '4K'] as const
+
+/** Качество одного хоста: те же ограничения, что у общих настроек. Неверное — null. */
+function normalizeProfile(p: Partial<QualityProfile> | null | undefined): QualityProfile | null {
+  if (!p || typeof p !== 'object') return null
+  return {
+    resolution: oneOf(p.resolution, RESOLUTIONS, 'auto'),
+    fps: FPS_OPTIONS.includes(Number(p.fps)) ? Number(p.fps) : 60,
+    bitrateKbps: p.bitrateKbps === 0 ? 0 : clampInt(p.bitrateKbps, 500, 150000, 0)
+  }
+}
+
+function normalizeHostQuality(v: unknown): Record<string, QualityProfile> {
+  const out: Record<string, QualityProfile> = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  for (const [addr, p] of Object.entries(v as Record<string, unknown>).slice(0, 16)) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(addr)) continue
+    const prof = normalizeProfile(p as Partial<QualityProfile>)
+    if (prof) out[addr] = prof
+  }
+  return out
+}
+
+function normalizeEncoder(c: Partial<EncoderCustom> | undefined): EncoderCustom {
+  const d = DEFAULT_SETTINGS.host.encoderCustom
+  return {
+    nvPreset: clampInt(c?.nvPreset, 1, 7, d.nvPreset),
+    nvTwoPass: oneOf(c?.nvTwoPass, ['disabled', 'quarter_res', 'full_res'] as const, d.nvTwoPass),
+    nvSpatialAq: bool(c?.nvSpatialAq, d.nvSpatialAq),
+    amdUsage: oneOf(c?.amdUsage, ['ultralowlatency', 'lowlatency', 'lowlatency_high_quality'] as const, d.amdUsage),
+    amdQuality: oneOf(c?.amdQuality, ['speed', 'balanced', 'quality'] as const, d.amdQuality),
+    amdRc: oneOf(c?.amdRc, ['vbr_latency', 'cbr', 'vbr_peak'] as const, d.amdRc),
+    amdPreanalysis: bool(c?.amdPreanalysis, d.amdPreanalysis),
+    amdVbaq: bool(c?.amdVbaq, d.amdVbaq),
+    qsvPreset: oneOf(c?.qsvPreset, ['veryfast', 'faster', 'fast', 'medium', 'slow'] as const, d.qsvPreset),
+    swPreset: oneOf(c?.swPreset, ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast'] as const, d.swPreset),
+    swThreads: clampInt(c?.swThreads, 1, 32, d.swThreads)
+  }
+}
+
 export const isDisplayId = (v: unknown): v is string => typeof v === 'string' && /^\{[0-9a-fA-F-]{36}\}$/.test(v)
 
 /** Приводит настройки к допустимым значениям (данные приходят из renderer и с диска). */
@@ -30,6 +71,13 @@ export function normalizeSettings(s: Settings): Settings {
   const v1 = !(Number(s.schema) >= 2)
   const displayMode = v1 && st?.displayMode === 'fullscreen' ? 'borderless' : st?.displayMode
   const legacyVirtual = (s.host as { useVirtualDisplay?: unknown } | undefined)?.useVirtualDisplay === true
+  // Версия 2: наборы качества и потолок битрейта переведены под хост с RTX 40/50.
+  const v2 = !(Number(s.schema) >= 3)
+  const quality = v2 && st ? migratePreset({ resolution: st.resolution, fps: st.fps, bitrateKbps: st.bitrateKbps }) : st
+  const hostQualityIn = v2 && s.hostQuality && typeof s.hostQuality === 'object'
+    ? Object.fromEntries(Object.entries(s.hostQuality).map(([k, q]) => [k, q && typeof q === 'object' ? migratePreset(q) : q]))
+    : s.hostQuality
+  const maxBitrateIn = v2 && s.host?.maxBitrateKbps === 20000 ? -1 : s.host?.maxBitrateKbps
   const display = typeof s.host?.display === 'string' ? s.host.display : legacyVirtual ? 'virtual' : d.host.display
   return {
     schema: SETTINGS_SCHEMA,
@@ -41,9 +89,9 @@ export function normalizeSettings(s: Settings): Settings {
     autostart: bool(s.autostart, false),
     closeToTray: bool(s.closeToTray, d.closeToTray),
     stream: {
-      resolution: oneOf(st?.resolution, ['auto', '720', '1080', '1440', '4K'] as const, d.stream.resolution),
-      fps: FPS_OPTIONS.includes(Number(st?.fps)) ? Number(st.fps) : d.stream.fps,
-      bitrateKbps: st?.bitrateKbps === 0 ? 0 : clampInt(st?.bitrateKbps, 500, 150000, 0),
+      resolution: oneOf(quality?.resolution, ['auto', '720', '1080', '1440', '4K'] as const, d.stream.resolution),
+      fps: FPS_OPTIONS.includes(Number(quality?.fps)) ? Number(quality!.fps) : d.stream.fps,
+      bitrateKbps: quality?.bitrateKbps === 0 ? 0 : clampInt(quality?.bitrateKbps, 500, 150000, 0),
       codec: oneOf(st?.codec, ['auto', 'H.264', 'HEVC', 'AV1'] as const, d.stream.codec),
       displayMode: oneOf(displayMode, ['fullscreen', 'borderless', 'windowed'] as const, d.stream.displayMode),
       vsync: bool(st?.vsync, d.stream.vsync),
@@ -53,7 +101,10 @@ export function normalizeSettings(s: Settings): Settings {
       captureSystemKeys: oneOf(st?.captureSystemKeys, ['never', 'fullscreen', 'always'] as const, d.stream.captureSystemKeys),
       absoluteMouse: bool(st?.absoluteMouse, d.stream.absoluteMouse),
       volume: clampInt(st?.volume, 0, 100, d.stream.volume),
-      muteHostChat: bool(st?.muteHostChat, d.stream.muteHostChat)
+      muteHostChat: bool(st?.muteHostChat, d.stream.muteHostChat),
+      autoQuality: bool(st?.autoQuality, d.stream.autoQuality),
+      hdr: bool(st?.hdr, d.stream.hdr),
+      yuv444: bool(st?.yuv444, d.stream.yuv444)
     },
     host: {
       maxPlayers: clampInt(s.host?.maxPlayers, 1, 4, d.host.maxPlayers),
@@ -61,13 +112,17 @@ export function normalizeSettings(s: Settings): Settings {
       // id монитора в Apollo — GUID в фигурных скобках.
       display: display === 'primary' || display === 'virtual' || isDisplayId(display) ? display : d.host.display,
       virtualOnly: bool(s.host?.virtualOnly, d.host.virtualOnly),
-      maxBitrateKbps: s.host?.maxBitrateKbps === 0 ? 0 : clampInt(s.host?.maxBitrateKbps, 2000, 150000, d.host.maxBitrateKbps),
+      maxBitrateKbps: maxBitrateIn === 0 || maxBitrateIn === -1 ? maxBitrateIn : clampInt(maxBitrateIn, 2000, 150000, d.host.maxBitrateKbps),
       keepHostAudio: bool(s.host?.keepHostAudio, d.host.keepHostAudio),
       chatRouting: bool(s.host?.chatRouting, d.host.chatRouting),
       lossProtection: oneOf(s.host?.lossProtection, ['normal', 'high'] as const, d.host.lossProtection),
+      encoderPreset: oneOf(s.host?.encoderPreset, ['latency', 'balanced', 'quality', 'custom'] as const, d.host.encoderPreset),
+      encoderCustom: normalizeEncoder(s.host?.encoderCustom),
       notifyRequests: bool(s.host?.notifyRequests, d.host.notifyRequests),
-      autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting)
+      autoStartHosting: bool(s.host?.autoStartHosting, d.host.autoStartHosting),
+      inviteAutoAdmit: bool(s.host?.inviteAutoAdmit, d.host.inviteAutoAdmit)
     },
+    hostQuality: normalizeHostQuality(hostQualityIn),
     recentHosts: Array.isArray(s.recentHosts)
       ? s.recentHosts
           .filter((h) => h && typeof h.address === 'string' && /^[\d.]+$/.test(h.address))
@@ -95,8 +150,23 @@ export class SettingsService extends EventEmitter {
     return this.file.get()
   }
 
+  /**
+   * Частичное обновление. hostQuality — словарь по адресам: новые адреса добавляются,
+   * null удаляет запись (deepMerge сам новые ключи не добавляет).
+   */
   update(patch: DeepPartial<Settings>): Settings {
-    const next = normalizeSettings(deepMerge(this.file.get(), patch))
+    const cur = this.file.get()
+    const { hostQuality, ...rest } = patch as DeepPartial<Settings> & { hostQuality?: Record<string, Partial<QualityProfile> | null> }
+    const merged = deepMerge(cur, rest)
+    if (hostQuality && typeof hostQuality === 'object') {
+      const hq: Record<string, unknown> = { ...cur.hostQuality }
+      for (const [addr, p] of Object.entries(hostQuality)) {
+        if (p === null) delete hq[addr]
+        else hq[addr] = { ...(cur.hostQuality[addr] ?? {}), ...p }
+      }
+      merged.hostQuality = hq as Record<string, QualityProfile>
+    }
+    const next = normalizeSettings(merged)
     this.file.set(next)
     this.emit('change', next)
     return next

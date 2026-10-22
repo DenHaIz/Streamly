@@ -1,4 +1,4 @@
-import type { HostDisplay } from '@shared/types'
+import type { EncoderVendor, HostDisplay, HostEncoder } from '@shared/types'
 
 const MARKER = 'Currently available display devices:'
 
@@ -70,4 +70,22 @@ export function parseDisplayDevices(log: string): HostDisplay[] {
     })
   }
   return out.sort((a, b) => Number(b.primary) - Number(a.primary) || a.displayName.localeCompare(b.displayName))
+}
+
+/**
+ * Кодировщик видео по логу Apollo: при проверке кодировщиков он пишет
+ * «Found H.264 encoder: h264_nvenc [nvenc]», «Found HEVC encoder: …», «Found AV1 encoder: …».
+ * Берётся последняя проверка (Apollo повторяет её перед каждым запуском).
+ */
+export function parseEncoder(log: string): HostEncoder | undefined {
+  const at = log.lastIndexOf('Found H.264 encoder:')
+  if (at < 0) return undefined
+  const tail = log.slice(at)
+  const m = /Found H\.264 encoder: \S+ \[(\w+)\]/.exec(tail)
+  if (!m) return undefined
+  // Следующая проверка начинается со строки H.264: смотрим HEVC и AV1 только до неё.
+  const block = tail.split(/\n(?=.*Found H\.264 encoder:)/)[0]
+  const known: EncoderVendor[] = ['nvenc', 'amdvce', 'quicksync', 'software']
+  const vendor = (known as string[]).includes(m[1]) ? (m[1] as EncoderVendor) : 'other'
+  return { vendor, hevc: /Found HEVC encoder:/.test(block), av1: /Found AV1 encoder:/.test(block) }
 }

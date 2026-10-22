@@ -48,19 +48,29 @@ export function pickBitrate(s: StreamSettings, size: [number, number] | undefine
   return Math.max(2000, Math.min(auto, cap))
 }
 
+/** Итоговые параметры трансляции: разрешение, частота и битрейт с учётом условий хоста. */
+export function streamParams(
+  s: StreamSettings,
+  native?: { width: number; height: number; fps?: number },
+  policy?: StreamPolicy
+): { size?: [number, number]; fps: number; bitrateKbps?: number } {
+  const size = s.resolution === 'auto' ? pickResolution(native, policy) : RES[s.resolution]
+  // Частоту выше, чем у монитора хоста, Apollo всё равно не захватит, а выше экрана игрока — тот не покажет.
+  let fps = policy?.hostFps && policy.hostFps >= 30 ? Math.min(s.fps, policy.hostFps) : s.fps
+  if (native?.fps && native.fps >= 30) fps = Math.min(fps, native.fps)
+  return { size, fps, bitrateKbps: pickBitrate(s, size, fps, policy) }
+}
+
 /** Аргументы `Moonlight.exe stream` с учётом условий хоста (звук, потолок битрейта, монитор хоста). */
 export function buildStreamArgs(host: string, s: StreamSettings, native?: { width: number; height: number }, policy?: StreamPolicy): string[] {
   const args = ['stream', host, APOLLO_APP]
-  const size = s.resolution === 'auto' ? pickResolution(native, policy) : RES[s.resolution]
+  const { size, fps, bitrateKbps: bitrate } = streamParams(s, native, policy)
   if (s.resolution === 'auto') {
     if (size) args.push('--resolution', `${size[0]}x${size[1]}`)
   } else {
     args.push(`--${s.resolution}`)
   }
-  // Частоту выше, чем у монитора хоста, Apollo всё равно не захватит.
-  const fps = policy?.hostFps && policy.hostFps >= 30 ? Math.min(s.fps, policy.hostFps) : s.fps
   args.push('--fps', String(fps))
-  const bitrate = pickBitrate(s, size, fps, policy)
   if (bitrate) args.push('--bitrate', String(bitrate))
   if (s.codec !== 'auto') args.push('--video-codec', s.codec)
   if (s.packetSize > 0) args.push('--packet-size', String(s.packetSize))
@@ -72,6 +82,11 @@ export function buildStreamArgs(host: string, s: StreamSettings, native?: { widt
   // Звук решает хост: при совместной игре он должен слышать игру сам (см. HostSettings.keepHostAudio).
   args.push(policy?.hostAudio === false ? '--no-audio-on-host' : '--audio-on-host')
   args.push(s.absoluteMouse ? '--absolute-mouse' : '--no-absolute-mouse')
+  // HDR и 4:4:4 Moonlight включает, только если их поддерживают оба ПК («if supported»).
+  args.push(s.hdr ? '--hdr' : '--no-hdr')
+  args.push(s.yuv444 ? '--yuv444' : '--no-yuv444')
+  // Геймпад работает и когда окно трансляции не в фокусе: меню Alt+F2, второй монитор.
+  args.push('--background-gamepad')
   // Рабочий стол общий для всех: уход одного игрока не должен закрывать его у остальных.
   args.push('--no-quit-after', '--no-game-optimization', '--multi-controller', '--keep-awake')
   return args

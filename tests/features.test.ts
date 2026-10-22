@@ -99,7 +99,7 @@ describe('settings migration', () => {
 
   it('moves 0.1 users to borderless full screen and keeps the virtual monitor choice', () => {
     const s = normalizeSettings(base({ stream: { displayMode: 'fullscreen' }, host: { useVirtualDisplay: true } }))
-    expect(s.schema).toBe(2)
+    expect(s.schema).toBe(3)
     expect(s.stream.displayMode).toBe('borderless')
     expect(s.host.display).toBe('virtual')
     expect(s.stream.volume).toBe(100)
@@ -121,5 +121,131 @@ describe('moonlight args with audio routing', () => {
     const args = buildStreamArgs('26.1.1.1', s, undefined, { hostAudio: false, maxBitrateKbps: 0, hostWidth: 0, hostHeight: 0, hostFps: 0 })
     expect(args).toContain('--no-audio-on-host')
     expect(args).toContain('borderless')
+  })
+})
+
+// ---------------------------------------------------------------- 0.3
+import { makeInviteLink, parseInviteLink } from '@shared/protocol'
+import { autoBitrateCap, migratePreset, PRESETS } from '@shared/quality'
+import { parseEncoder } from '../src/main/services/apollo/displays'
+import { autoProfile, lowerProfile, relaySuspect } from '../src/main/services/client/quality'
+import { streamParams } from '../src/main/services/moonlight/runner'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SettingsService } from '../src/main/settings'
+
+describe('invite links', () => {
+  it('round-trips and is found inside a chat message', () => {
+    const link = makeInviteLink('26.14.88.201', 'Дима & Co', 'abcDEF123_-xyz')
+    expect(parseInviteLink(link)).toEqual({ address: '26.14.88.201', name: 'Дима & Co', code: 'abcDEF123_-xyz' })
+    expect(parseInviteLink(`Заходи!\n${link}\nЖду`)?.address).toBe('26.14.88.201')
+  })
+
+  it('rejects junk', () => {
+    expect(parseInviteLink('streamly://join/999.1.1.1?name=x')).toBeNull()
+    expect(parseInviteLink('https://example.com')).toBeNull()
+    expect(parseInviteLink('streamly://join/26.1.1.1?name=<script>&code=no')).toEqual({ address: '26.1.1.1', name: 'Player', code: undefined })
+  })
+})
+
+describe('host encoder from the Apollo log', () => {
+  it('reads the last encoder probe', () => {
+    const log = `Info: Found H.264 encoder: libx264 [software]
+Info: Found H.264 encoder: h264_nvenc [nvenc]
+Info: Found HEVC encoder: hevc_nvenc [nvenc]
+Info: Found AV1 encoder: av1_nvenc [nvenc]`
+    expect(parseEncoder(log)).toEqual({ vendor: 'nvenc', hevc: true, av1: true })
+    expect(parseEncoder('Info: Found H.264 encoder: libx264 [software]')).toEqual({ vendor: 'software', hevc: false, av1: false })
+    expect(parseEncoder('nothing')).toBeUndefined()
+  })
+})
+
+describe('auto quality', () => {
+  const base = { resolution: 'auto' as const, fps: 60 }
+  it('uses 60% of the measured channel, within the host cap', () => {
+    expect(autoProfile(100, base, 30000)).toEqual({ resolution: 'auto', fps: 60, bitrateKbps: 30000 })
+    expect(autoProfile(20, base, 30000)).toEqual({ resolution: '1080', fps: 60, bitrateKbps: 12000 })
+    expect(autoProfile(8, base, 30000)).toEqual({ resolution: '720', fps: 60, bitrateKbps: 5000 })
+    expect(autoProfile(3, base, 30000)).toEqual({ resolution: '720', fps: 30, bitrateKbps: 2500 })
+    // Никогда не выше того, что игрок выбрал сам.
+    expect(autoProfile(200, { resolution: '1080', fps: 60 }, 0).resolution).toBe('1080')
+  })
+
+  it('steps down by 30% until the floor', () => {
+    expect(lowerProfile({ resolution: 'auto', fps: 60, bitrateKbps: 20000 }, base)).toEqual({ resolution: '1080', fps: 60, bitrateKbps: 14000 })
+    expect(lowerProfile({ resolution: '720', fps: 30, bitrateKbps: 2500 }, base)).toBeNull()
+  })
+
+  it('suspects the Radmin relay from latency and speed', () => {
+    expect(relaySuspect([10, 12, 11, 9])).toBe(false)
+    expect(relaySuspect([95, 90, 110])).toBe(true)
+    expect(relaySuspect([40, 45, 38], 6)).toBe(true)
+  })
+})
+
+describe('presets tuned for an RTX host', () => {
+  it('migrates 0.2 presets and the bitrate cap', () => {
+    expect(migratePreset({ resolution: '720', fps: 30, bitrateKbps: 5000 })).toEqual(PRESETS.economy)
+    expect(migratePreset({ resolution: '1080', fps: 60, bitrateKbps: 15000 })).toEqual({ resolution: '1080', fps: 60, bitrateKbps: 15000 })
+    const s = normalizeSettings({
+      schema: 2,
+      nickname: 'A',
+      deviceId: '00000000-0000-4000-8000-000000000000',
+      stream: { resolution: 'auto', fps: 60, bitrateKbps: 40000 },
+      host: { maxBitrateKbps: 20000 }
+    } as unknown as Settings)
+    expect(s.stream).toMatchObject(PRESETS.high)
+    expect(s.host.maxBitrateKbps).toBe(-1)
+    expect(s.host.encoderPreset).toBe('balanced')
+    expect(s.host.encoderCustom.nvPreset).toBe(3)
+  })
+
+  it('auto cap shares the upload between players', () => {
+    expect(autoBitrateCap(1)).toBe(30000)
+    expect(autoBitrateCap(2)).toBe(30000)
+    expect(autoBitrateCap(4)).toBe(20000)
+  })
+
+  it('never streams more FPS than the player screen shows', () => {
+    const st = normalizeSettings({ nickname: 'A', deviceId: '00000000-0000-4000-8000-000000000000' } as unknown as Settings).stream
+    expect(streamParams({ ...st, ...PRESETS.high }, { width: 1920, height: 1080, fps: 60 }, { hostAudio: true, maxBitrateKbps: 30000, hostWidth: 2560, hostHeight: 1440, hostFps: 165 }).fps).toBe(60)
+    expect(streamParams({ ...st, ...PRESETS.high }, { width: 2560, height: 1440, fps: 144 }, { hostAudio: true, maxBitrateKbps: 30000, hostWidth: 2560, hostHeight: 1440, hostFps: 165 }).fps).toBe(120)
+  })
+})
+
+describe('protocol 0.3', () => {
+  it('validates new messages', () => {
+    expect(parseClientMessage(JSON.stringify({ t: 'inputRequest', perms: { keyboard: true, mouse: false, gamepad: false } }))).toBeTruthy()
+    expect(parseClientMessage(JSON.stringify({ t: 'inputRequest', perms: 'all' }))).toBeNull()
+    expect(parseClientMessage(JSON.stringify({ t: 'speedTest' }))).toBeTruthy()
+    const hello = { t: 'hello', v: 1, deviceId: '00000000-0000-4000-8000-000000000000', nickname: 'A', appVersion: '0.3.0' }
+    expect(parseClientMessage(JSON.stringify({ ...hello, inviteCode: 'abcDEF123_-xyz' }))).toBeTruthy()
+    expect(parseClientMessage(JSON.stringify({ ...hello, inviteCode: 'bad code!' }))).toBeNull()
+    expect(parseHostMessage(JSON.stringify({ t: 'speedEnd', bytes: 4194304 }))).toBeTruthy()
+    expect(parseHostMessage(JSON.stringify({ t: 'speedEnd', bytes: -1 }))).toBeNull()
+    expect(parseHostMessage(JSON.stringify({ t: 'inputPaused', paused: true }))).toBeTruthy()
+    expect(parseHostMessage(JSON.stringify({ t: 'inputRequestResult', granted: false }))).toBeTruthy()
+    const policy = { hostAudio: true, maxBitrateKbps: 30000, hostWidth: 0, hostHeight: 0, hostFps: 0 }
+    const accepted = { t: 'joinAccepted', perms: NO_INPUT, needsPair: false }
+    expect(parseHostMessage(JSON.stringify({ ...accepted, policy: { ...policy, encoder: { vendor: 'nvenc', hevc: true, av1: true } } }))).toBeTruthy()
+    expect(parseHostMessage(JSON.stringify({ ...accepted, policy: { ...policy, encoder: { vendor: 'x' } } }))).toBeNull()
+  })
+})
+
+describe('per-host quality', () => {
+  it('adds and removes host entries', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'streamly-hq-'))
+    try {
+      const s = new SettingsService(dir, 'ru')
+      s.update({ hostQuality: { '26.1.1.1': PRESETS.economy } })
+      expect(s.get().hostQuality['26.1.1.1']).toEqual(PRESETS.economy)
+      s.update({ hostQuality: { '26.1.1.1': null } } as never)
+      expect(s.get().hostQuality).toEqual({})
+      s.update({ hostQuality: { 'not-an-ip': PRESETS.high } })
+      expect(s.get().hostQuality).toEqual({})
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

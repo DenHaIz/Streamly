@@ -33,7 +33,9 @@ let host: HostState = {
   gamepadDriver: true,
   address: radmin.ip,
   audio: { chatControl: true, chatExcluded: false, monitoring: false },
-  pendingRestart: false
+  pendingRestart: false,
+  inputPaused: false,
+  encoder: { vendor: params.get('cpu') === '1' ? 'software' : 'nvenc', hevc: true, av1: params.get('cpu') !== '1' }
 }
 const displays: HostDisplay[] = [
   { id: '{de9bb7e2-186e-505b-9e93-f48793333810}', name: 'ROG PG279Q', displayName: '\\\\.\\DISPLAY1', primary: true, width: 2560, height: 1440, fps: 165 },
@@ -49,8 +51,12 @@ const streamingDemo: ClientState = {
   jitterMs: params.get('poor') === '1' ? 34 : 3,
   poorNetwork: params.get('poor') === '1',
   hostChat: { control: params.get('nochat') !== '1', excluded: true },
+  speedMbps: params.get('poor') === '1' ? 8 : 74,
+  wifi: params.get('poor') === '1',
+  relaySuspect: params.get('poor') === '1',
+  active: { width: 2560, height: 1440, fps: 60, bitrateKbps: 20000, auto: false },
   startedAt: Date.now() - 754_000,
-  policy: { hostAudio: false, maxBitrateKbps: 20000, hostWidth: 2560, hostHeight: 1440, hostFps: 165 }
+  policy: { hostAudio: false, maxBitrateKbps: 20000, hostWidth: 2560, hostHeight: 1440, hostFps: 165, encoder: { vendor: 'nvenc', hevc: true, av1: true } }
 }
 let client: ClientState = params.get('stream') === '1' || location.hash === '#overlay' ? streamingDemo : { phase: 'idle' }
 let hosts: DiscoveredHost[] = []
@@ -66,6 +72,7 @@ const setClient = (patch: Partial<ClientState>): void => {
 }
 
 let clientRun = 0
+let inviteShown = false
 
 function scheduleRequests(): void {
   const names = ['Вася', 'Константин Великолепный', 'Kate', 'Миша']
@@ -97,6 +104,8 @@ const bridge: StreamlyBridge = {
   setTitleBar: async () => undefined,
   openLogs: async () => undefined,
   copyDiagnostics: async () => void navigator.clipboard?.writeText('Streamly diagnostics (mock)').catch(() => undefined),
+  // ?invite=1 — показать приглашение при запуске.
+  checkInvite: async () => (params.get('invite') === '1' && !inviteShown ? ((inviteShown = true), { address: '26.51.7.12', name: 'Дима', code: 'demo-invite-code' }) : null),
   host: {
     getState: async () => host,
     async start() {
@@ -140,7 +149,10 @@ const bridge: StreamlyBridge = {
             // Для наглядности: второй игрок выключил себе геймпад, третий жалуется на связь.
             selfOff: host.players.length === 1 ? { ...NO_INPUT, gamepad: true } : { ...NO_INPUT },
             muteChat: host.players.length % 2 === 0,
-            poorNetwork: host.players.length === 2
+            poorNetwork: host.players.length === 2,
+            viaInvite: host.players.length === 0,
+            // Третий игрок просит геймпад: у хоста карточка с «Выдать» и «Отказать».
+            inputRequest: host.players.length === 2 ? { keyboard: false, mouse: false, gamepad: true } : undefined
           }
         ]
       })
@@ -192,7 +204,18 @@ const bridge: StreamlyBridge = {
         1
       )
     },
-    listDisplays: async () => displays
+    listDisplays: async () => displays,
+    createInvite: async () => ({ link: `streamly://join/${radmin.ip}?name=${encodeURIComponent(settings.nickname)}&code=demo-invite-code`, expiresAt: Date.now() + 12 * 3600e3 }),
+    async respondInput(id, grant) {
+      setHost({
+        players: host.players.map((p) =>
+          p.deviceId === id ? { ...p, inputRequest: undefined, perms: grant ? { ...p.perms, ...p.inputRequest } : p.perms } : p
+        )
+      })
+    },
+    async setInputPaused(paused) {
+      setHost({ inputPaused: paused })
+    }
   },
   client: {
     getState: async () => client,
@@ -253,6 +276,11 @@ const bridge: StreamlyBridge = {
     async setSelfOff(patch) {
       setClient({ selfOff: { ...(client.selfOff ?? NO_INPUT), ...patch } })
     },
+    async requestInput() {
+      setClient({ inputRequest: 'pending' })
+      await wait(2500)
+      setClient({ inputRequest: undefined, perms: { keyboard: true, mouse: true, gamepad: true } })
+    },
     async restartStream() {
       setClient({ restarting: true })
       await wait(2500)
@@ -265,7 +293,8 @@ const bridge: StreamlyBridge = {
       emit('overlay', { open: false, screens: 2 })
       setTimeout(() => emit('overlay', { open: true, screens: 2 }), 1200)
     },
-    toOtherScreen: async () => true
+    toOtherScreen: async () => true,
+    toggleStats: async () => true
   },
   on(event, cb) {
     let set = listeners.get(event)

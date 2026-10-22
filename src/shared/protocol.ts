@@ -1,6 +1,6 @@
 // Протокол Streamly между клиентом и хостом: JSON-сообщения поверх WebSocket.
 import type { InputPerms } from './perms'
-import type { StreamPolicy } from './types'
+import type { Invite, StreamPolicy } from './types'
 
 export const PROTOCOL_VERSION = 1
 export const SIGNALING_PORT = 47900
@@ -11,7 +11,7 @@ export const DISCOVERY_REPLY = 'STREAMLY_HOST_V1'
 export const APOLLO_APP = 'Desktop'
 
 export type ClientMessage =
-  | { t: 'hello'; v: number; deviceId: string; nickname: string; appVersion: string; trustToken?: string }
+  | { t: 'hello'; v: number; deviceId: string; nickname: string; appVersion: string; trustToken?: string; inviteCode?: string }
   | { t: 'joinRequest' }
   | { t: 'pairRequest' }
   | { t: 'pairSpawned' }
@@ -25,6 +25,10 @@ export type ClientMessage =
   | { t: 'prefs'; muteChat: boolean; selfOff: InputPerms }
   /** Moonlight у игрока сообщает о плохой (или снова нормальной) связи. */
   | { t: 'netStatus'; poor: boolean }
+  /** Игрок просит выдать ввод, который хост выключил (true — просит). */
+  | { t: 'inputRequest'; perms: InputPerms }
+  /** Замер скорости: хост присылает двоичные данные и затем speedEnd. */
+  | { t: 'speedTest' }
 
 export type HostMessage =
   | { t: 'hostInfo'; v: number; hostName: string; slotsUsed: number; maxSlots: number }
@@ -47,6 +51,11 @@ export type HostMessage =
   | { t: 'pong'; ts?: number }
   /** chatControl: хост может убрать Discord из трансляции; chatExcluded: убран сейчас. */
   | { t: 'audioState'; chatControl: boolean; chatExcluded: boolean }
+  | { t: 'inputRequestResult'; granted: boolean }
+  /** Хост временно забрал (или вернул) ввод у всех игроков. */
+  | { t: 'inputPaused'; paused: boolean }
+  /** Конец замера скорости: сколько байт отправлено (0 — замер сейчас недоступен). */
+  | { t: 'speedEnd'; bytes: number }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -68,7 +77,9 @@ const CLIENT_TYPES = new Set([
   'sessionEnded',
   'ping',
   'prefs',
-  'netStatus'
+  'netStatus',
+  'inputRequest',
+  'speedTest'
 ])
 const HOST_TYPES = new Set([
   'hostInfo',
@@ -82,7 +93,10 @@ const HOST_TYPES = new Set([
   'hostStopping',
   'sessionState',
   'pong',
-  'audioState'
+  'audioState',
+  'inputRequestResult',
+  'inputPaused',
+  'speedEnd'
 ])
 
 const MAX_MESSAGE = 4096
@@ -112,7 +126,9 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
   if (m.t === 'hello') {
     if (typeof m.v !== 'number' || !isDeviceId(m.deviceId) || !str(m.nickname, 32) || !str(m.appVersion, 32)) return null
     if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
+    if (m.inviteCode !== undefined && !(typeof m.inviteCode === 'string' && /^[\w-]{8,64}$/.test(m.inviteCode))) return null
   }
+  if (m.t === 'inputRequest' && !isPerms(m.perms)) return null
   if (m.t === 'prefs' && (typeof m.muteChat !== 'boolean' || !isPerms(m.selfOff))) return null
   if (m.t === 'netStatus' && typeof m.poor !== 'boolean') return null
   return m as unknown as ClientMessage
@@ -124,6 +140,11 @@ const isPerms = (v: unknown): v is InputPerms =>
 const isPolicy = (v: unknown): v is StreamPolicy => {
   if (!v || typeof v !== 'object') return false
   const p = v as Record<string, unknown>
+  if (p.encoder !== undefined) {
+    const e = p.encoder as Record<string, unknown> | null
+    if (!e || typeof e !== 'object' || !['nvenc', 'amdvce', 'quicksync', 'software', 'other'].includes(e.vendor as string)) return false
+    if (typeof e.hevc !== 'boolean' || typeof e.av1 !== 'boolean') return false
+  }
   return (
     typeof p.hostAudio === 'boolean' &&
     int(p.maxBitrateKbps, 0, 500_000) &&
@@ -164,6 +185,15 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
     case 'audioState':
       if (typeof m.chatControl !== 'boolean' || typeof m.chatExcluded !== 'boolean') return null
       break
+    case 'inputRequestResult':
+      if (typeof m.granted !== 'boolean') return null
+      break
+    case 'inputPaused':
+      if (typeof m.paused !== 'boolean') return null
+      break
+    case 'speedEnd':
+      if (!int(m.bytes, 0, 64 * 1024 * 1024)) return null
+      break
   }
   return m as unknown as HostMessage
 }
@@ -188,4 +218,29 @@ export function parseDiscoveryReply(raw: Uint8Array | string): DiscoveryReply | 
 export function sanitizeNickname(name: string): string {
   const clean = name.replace(/[\u0000-\u001f\u007f<>"'`\\]/g, '').trim().slice(0, 24)
   return clean || 'Player'
+}
+
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
+
+/** Ссылка-приглашение: streamly://join/<адрес>?name=<имя хоста>&code=<код>. */
+export function makeInviteLink(address: string, name: string, code?: string): string {
+  const q = new URLSearchParams({ name })
+  if (code) q.set('code', code)
+  return `streamly://join/${address}?${q.toString()}`
+}
+
+/** Находит и разбирает ссылку-приглашение в произвольном тексте (сообщение из Discord, аргументы запуска). */
+export function parseInviteLink(text: string): Invite | null {
+  const m = /streamly:\/\/join\/([0-9.]{7,15})(\?[^\s"'<>]*)?/i.exec(text)
+  if (!m) return null
+  const address = m[1]
+  const ip = IPV4.exec(address)
+  if (!ip || ip.slice(1).some((n) => Number(n) > 255)) return null
+  const q = new URLSearchParams(m[2] ?? '')
+  const code = q.get('code') ?? undefined
+  return {
+    address,
+    name: sanitizeNickname(q.get('name') ?? address),
+    code: code && /^[\w-]{8,64}$/.test(code) ? code : undefined
+  }
 }

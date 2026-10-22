@@ -3,7 +3,9 @@ import {
   Check,
   Copy,
   Download,
+  Cpu,
   Gamepad2,
+  Hand,
   Headphones,
   Info,
   Keyboard,
@@ -29,6 +31,7 @@ import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
 import type { HostState, JoinRequestView, PlayerView } from '@shared/types'
 import { useApp } from '@/store/app'
+import { autoBitrateCap } from '@shared/quality'
 import { api } from '@/lib/bridge'
 import { Avatar, Button, Modal, riseIn, softSpring, spring, stagger } from '@/components/ui'
 import { RadminHelp } from '@/components/RadminBadge'
@@ -297,9 +300,10 @@ function Dashboard({ host }: { host: HostState }) {
   const capKbps = useApp((s) => s.settings?.host.maxBitrateKbps ?? 0)
   const toast = useApp((s) => s.toast)
   // Готовый текст-приглашение: что сделать другу, чтобы подключиться.
-  const invite = (): void => {
-    void api().copyText(t('host.inviteText', { name: host.hostName, address: host.address ?? '' }))
-    toast({ tone: 'success', text: t('host.inviteCopied') }, 3500)
+  const invite = async (): Promise<void> => {
+    const inv = await api().host.createInvite()
+    void api().copyText(t('host.inviteText', { name: host.hostName, address: host.address ?? '', link: inv?.link ?? '' }))
+    toast({ tone: 'success', text: t('host.inviteCopied') }, 6000)
   }
   const stop = (): void => {
     if (stopping) return
@@ -322,7 +326,18 @@ function Dashboard({ host }: { host: HostState }) {
           <Button variant="ghost" icon={<Stethoscope size={16} />} title={t('host.selfCheck')} aria-label={t('host.selfCheck')} onClick={() => useApp.getState().openDiag({ mode: 'host' })}>
             <span className="btn-label collapsible">{t('host.selfCheck')}</span>
           </Button>
-          <Button icon={<Send size={16} />} title={t('host.invite')} aria-label={t('host.invite')} onClick={invite}>
+          {host.players.length > 0 && (
+            <Button
+              variant={host.inputPaused ? 'primary' : 'ghost'}
+              icon={<Hand size={16} />}
+              title={`${host.inputPaused ? t('host.resumeInput') : t('host.pauseInput')} (Alt+F12)`}
+              aria-label={host.inputPaused ? t('host.resumeInput') : t('host.pauseInput')}
+              onClick={() => void api().host.setInputPaused(!host.inputPaused)}
+            >
+              <span className="btn-label collapsible">{host.inputPaused ? t('host.resumeInput') : t('host.pauseInput')}</span>
+            </Button>
+          )}
+          <Button icon={<Send size={16} />} title={t('host.invite')} aria-label={t('host.invite')} onClick={() => void invite()}>
             <span className="btn-label collapsible">{t('host.invite')}</span>
           </Button>
           {host.players.length > 1 && (
@@ -351,10 +366,21 @@ function Dashboard({ host }: { host: HostState }) {
           </div>
           <div className="slots-count">{t('host.slots', { used: host.players.length, max: host.maxPlayers })}</div>
           <SlotMeter used={host.players.length} max={host.maxPlayers} />
-          {host.players.length > 0 && capKbps > 0 && (
+          {host.players.length > 0 && (host.uploadMbps !== undefined || capKbps !== 0) && (
             <div className="upload-note" title={t('host.uploadHint')}>
               <Upload size={13} />
-              {t('host.upload', { mbps: Math.round((host.players.length * capKbps) / 1000) })}
+              {host.uploadMbps !== undefined
+                ? t('host.uploadNow', { mbps: host.uploadMbps })
+                : t('host.upload', { mbps: Math.round((host.players.length * (capKbps === -1 ? autoBitrateCap(host.players.length) : capKbps)) / 1000) })}
+            </div>
+          )}
+          {host.encoder && (
+            <div className={`upload-note ${host.encoder.vendor === 'software' ? 'warn' : ''}`} title={t('host.encoderHint')}>
+              <Cpu size={13} />
+              {t('host.encoder', {
+                name: t(`host.encoders.${host.encoder.vendor}`),
+                codecs: ['H.264', host.encoder.hevc && 'HEVC', host.encoder.av1 && 'AV1'].filter(Boolean).join(', ')
+              })}
             </div>
           )}
         </motion.div>
@@ -379,6 +405,33 @@ function Dashboard({ host }: { host: HostState }) {
             <Button size="sm" variant="ghost" onClick={() => void api().openExternal(VIGEM_URL)}>
               {t('host.getDriver')}
             </Button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {host.inputPaused && (
+          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <Hand size={18} />
+            <span style={{ flex: 1 }}>{t('host.pausedBanner')}</span>
+            <Button size="sm" variant="primary" onClick={() => void api().host.setInputPaused(false)}>
+              {t('host.resumeInput')}
+            </Button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {host.wrongGpu && (
+          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <Cpu size={18} />
+            <span style={{ flex: 1 }}>{t('host.wrongGpu', { gpu: host.wrongGpu.better, encoder: t(`host.encoders.${host.wrongGpu.encoderVendor}`) })}</span>
+          </motion.div>
+        )}
+        {!host.wrongGpu && host.encoder?.vendor === 'software' && (
+          <motion.div className="card warn-card" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+            <Cpu size={18} />
+            <span style={{ flex: 1 }}>{t('host.softwareEncoder')}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -577,6 +630,27 @@ function PlayerCard({ p, ref }: { p: PlayerView; ref?: Ref<HTMLDivElement> }) {
           <UserMinus size={17} />
         </motion.button>
       </div>
+      <AnimatePresence initial={false}>
+        {p.inputRequest && (
+          <motion.div className="input-request" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={softSpring}>
+            <Hand size={15} />
+            <span style={{ flex: 1 }}>
+              {t('host.asksFor', {
+                what: (['keyboard', 'mouse', 'gamepad'] as const)
+                  .filter((k) => p.inputRequest?.[k])
+                  .map((k) => t(`host.${k}`).toLowerCase())
+                  .join(', ')
+              })}
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => void api().host.respondInput(p.deviceId, false)}>
+              {t('host.deny')}
+            </Button>
+            <Button size="sm" variant="success" onClick={() => void api().host.respondInput(p.deviceId, true)}>
+              {t('host.give')}
+            </Button>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="perms">
         <PermToggle on={p.perms.keyboard} selfOff={p.selfOff.keyboard} icon={<Keyboard size={17} />} label={t('host.keyboard')} onClick={() => toggle('keyboard')} />
         <PermToggle on={p.perms.mouse} selfOff={p.selfOff.mouse} icon={<Mouse size={17} />} label={t('host.mouse')} onClick={() => toggle('mouse')} />

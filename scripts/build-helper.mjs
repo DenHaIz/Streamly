@@ -35,6 +35,7 @@ execFileSync(
     '/r:System.Web.Extensions.dll',
     '/r:System.Windows.Forms.dll',
     '/r:System.Drawing.dll',
+    '/r:System.Management.dll',
     src
   ],
   { stdio: 'inherit' }

@@ -12,6 +12,7 @@ import type { RouterOptions, RouterState } from '../src/main/services/helper/hel
 import { HostController } from '../src/main/services/host/controller'
 import { ClientController, type MoonlightLike } from '../src/main/services/client/controller'
 import type { MoonlightProcess } from '../src/main/services/moonlight/runner'
+import type { StreamSettings } from '@shared/types'
 import { SecretsService, SettingsService } from '../src/main/settings'
 
 class FakeApollo implements ApolloLike {
@@ -64,7 +65,9 @@ class FakeApollo implements ApolloLike {
     this.pending = null
     return true
   }
-  async patchConfig(): Promise<boolean> {
+  patches: Record<string, string>[] = []
+  async patchConfig(patch: Record<string, string>): Promise<boolean> {
+    this.patches.push(patch)
     return false
   }
   async restart(): Promise<void> {}
@@ -144,7 +147,9 @@ class FakeMoonlight implements MoonlightLike {
     // Без права list Apollo отдаёт заглушку «Permission Denied» — но сопряжение при этом есть.
     return fakeProcess(undefined, 0, (c.perm & 0x1000000) !== 0 ? ['Desktop', 'Steam Big Picture'] : ['Permission Denied'])
   }
-  stream(): MoonlightProcess {
+  lastStream?: StreamSettings
+  stream(_host: string, settings: StreamSettings): MoonlightProcess {
+    this.lastStream = settings
     this.streams++
     const c = this.myClient()
     // Подключение устанавливается не мгновенно: проверяем, что хост не пускает два запуска сразу.
@@ -267,7 +272,8 @@ describe('host ↔ client flow', () => {
     await host.respond(req.id, 'trust')
     await waitFor(() => client.getState().phase === 'streaming')
     // Хост передал условия трансляции, а задержка до хоста измеряется
-    expect(client.getState().policy).toMatchObject({ hostAudio: true, maxBitrateKbps: 20000, hostWidth: 1920 })
+    // «Авто»: одному игроку 30 Мбит/с (при 3–4 — 20).
+    expect(client.getState().policy).toMatchObject({ hostAudio: true, maxBitrateKbps: 30000, hostWidth: 1920 })
     await waitFor(() => client.getState().rttMs !== undefined)
     const ac = apollo.clients[0]
     expect(ac.name).toContain('Вася')
@@ -570,5 +576,104 @@ describe('host ↔ client flow', () => {
     expect(client.getState().restarting).toBe(true)
     await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming' && !client.getState().restarting)
     expect(host.getState().requests).toHaveLength(0)
+  }, 15000)
+
+  it('an invite link lets a friend in without approval, a wrong code does not', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const inv = host.createInvite()!
+    const code = new URL(inv.link).searchParams.get('code')!
+    expect(host.createInvite()!.link).toBe(inv.link)
+
+    const a = makeClient('Вася')
+    cleanups.push(() => a.client.cancel())
+    await a.client.connect('127.0.0.1', { inviteCode: code })
+    await waitFor(() => a.client.getState().phase === 'streaming')
+    expect(host.getState().players[0].viaInvite).toBe(true)
+
+    const b = makeClient('Петя')
+    cleanups.push(() => b.client.cancel())
+    await b.client.connect('127.0.0.1', { inviteCode: 'wrong-code-12345' })
+    await waitFor(() => host.getState().requests.length === 1)
+    expect(b.client.getState().phase).toBe('waitingApproval')
+  }, 15000)
+
+  it('a player asks for control, the host gives it or says no', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    const id = host.getState().players[0].deviceId
+    await host.setPerms(id, { gamepad: false })
+    await waitFor(() => client.getState().perms?.gamepad === false)
+
+    client.requestInput({ gamepad: true })
+    await waitFor(() => host.getState().players[0].inputRequest?.gamepad === true)
+    await host.respondInput(id, false)
+    await waitFor(() => client.getState().inputRequest === 'denied')
+    // Повторная просьба сразу после отказа отклоняется сама.
+    client.requestInput({ gamepad: true })
+    expect(host.getState().players[0].inputRequest).toBeUndefined()
+
+    await new Promise((r) => setTimeout(r, 50))
+    // Хост сам выдал геймпад — просьба выполнена.
+    await host.setPerms(id, { gamepad: true })
+    const perm = (): number => apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm
+    await waitFor(() => (perm() & PERM.inputController) !== 0)
+  }, 15000)
+
+  it('the host takes control from everyone and gives it back', async () => {
+    const { apollo, host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    const perm = (): number => apollo.clients.find((c) => c.uuid === moonlight.uuid)!.perm
+    const input = PERM.inputKbd | PERM.inputMouse | PERM.inputController
+
+    await host.setInputPaused(true)
+    await waitFor(() => (perm() & input) === 0 && client.getState().inputPaused === true)
+    // Опрос Apollo не возвращает права, пока пауза.
+    await new Promise((r) => setTimeout(r, 200))
+    expect(perm() & input).toBe(0)
+    // Выданные права не меняются: после паузы всё возвращается.
+    expect(host.getState().players[0].perms).toEqual({ keyboard: true, mouse: true, gamepad: true })
+    await host.setInputPaused(false)
+    await waitFor(() => (perm() & input) === input && client.getState().inputPaused === false)
+  }, 15000)
+
+  it('auto quality measures the channel and starts with the picked bitrate', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, settings, moonlight } = makeClient('Вася')
+    settings.update({ stream: { autoQuality: true } })
+    cleanups.push(() => client.cancel())
+    await client.connect('127.0.0.1')
+    const req = await waitFor(() => host.getState().requests[0])
+    await host.respond(req.id, 'allow')
+    await waitFor(() => client.getState().phase === 'streaming')
+    const st = client.getState()
+    expect(st.speedMbps).toBeGreaterThan(0)
+    expect(st.active?.auto).toBe(true)
+    // Через loopback канал быстрый: упираемся в потолок хоста («Авто» для одного игрока — 30 Мбит/с).
+    expect(moonlight.lastStream?.bitrateKbps).toBe(30000)
+  }, 15000)
+
+  it('applies the encoder preset tuned for RTX by default and manual settings on request', async () => {
+    const { apollo, host } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    expect(apollo.patches.at(-1)).toMatchObject({ nvenc_preset: '3', nvenc_twopass: 'quarter_res', amd_usage: 'ultralowlatency', fec_percentage: '30', max_bitrate: '30000' })
   }, 15000)
 })

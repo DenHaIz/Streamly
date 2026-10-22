@@ -33,3 +33,7 @@ nsis:
   installerLanguages: [ru_RU, en_US]
   language: '1049'
 npmRebuild: false
+# Ссылки-приглашения streamly://join/... открывают Streamly.
+protocols:
+  - name: Streamly invite
+    schemes: [streamly]

@@ -19,6 +19,7 @@ const bridge: StreamlyBridge = {
   setTitleBar: (dark) => invoke(IPC.setTitleBar, dark),
   openLogs: () => invoke(IPC.openLogs),
   copyDiagnostics: () => invoke(IPC.copyDiagnostics),
+  checkInvite: () => invoke(IPC.checkInvite),
   host: {
     getState: () => invoke(IPC.hostGetState),
     start: () => invoke(IPC.hostStart),
@@ -33,22 +34,27 @@ const bridge: StreamlyBridge = {
     selfCheck: () => invoke(IPC.hostSelfCheck),
     listTrusted: () => invoke(IPC.hostListTrusted),
     removeTrusted: (id) => invoke(IPC.hostRemoveTrusted, id),
-    listDisplays: () => invoke(IPC.hostListDisplays)
+    listDisplays: () => invoke(IPC.hostListDisplays),
+    createInvite: () => invoke(IPC.hostCreateInvite),
+    respondInput: (id, grant) => invoke(IPC.hostRespondInput, id, grant),
+    setInputPaused: (paused) => invoke(IPC.hostSetInputPaused, paused)
   },
   client: {
     getState: () => invoke(IPC.clientGetState),
     discover: () => invoke(IPC.clientDiscover),
     getHosts: () => invoke(IPC.clientGetHosts),
-    connect: (address) => invoke(IPC.clientConnect, address),
+    connect: (address, inviteCode) => invoke(IPC.clientConnect, address, inviteCode),
     diagnose: (address) => invoke(IPC.clientDiagnose, address),
     cancel: () => invoke(IPC.clientCancel),
     reset: () => invoke(IPC.clientReset),
     setSelfOff: (patch) => invoke(IPC.clientSetSelfOff, patch),
-    restartStream: () => invoke(IPC.clientRestartStream)
+    restartStream: () => invoke(IPC.clientRestartStream),
+    requestInput: (perms) => invoke(IPC.clientRequestInput, perms)
   },
   overlay: {
     close: () => invoke(IPC.overlayClose),
-    toOtherScreen: () => invoke(IPC.overlayOtherScreen)
+    toOtherScreen: () => invoke(IPC.overlayOtherScreen),
+    toggleStats: () => invoke(IPC.overlayToggleStats)
   },
   on: (event, cb) => {
     let set = listeners.get(event)

@@ -7,7 +7,7 @@ import { api } from '@/lib/bridge'
 import { useResolvedTheme } from '@/lib/theme'
 import { Button, softSpring } from '@/components/ui'
 import { PixelLogo } from '@/components/PixelLogo'
-import { StreamControls } from '@/components/StreamControls'
+import { StreamControls, StreamStats } from '@/components/StreamControls'
 import { RttBadge } from '@/screens/Host'
 
 /**
@@ -78,6 +78,7 @@ export function Overlay() {
                 <kbd className="kbd">Alt+F2</kbd>
               </header>
 
+              <StreamStats withMoonlight />
               <StreamControls />
 
               <footer className={`overlay-actions ${overlay.screens > 1 ? '' : 'single'}`}>

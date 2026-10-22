@@ -148,6 +148,8 @@ class FakeMoonlight implements MoonlightLike {
     return fakeProcess(undefined, 0, (c.perm & 0x1000000) !== 0 ? ['Desktop', 'Steam Big Picture'] : ['Permission Denied'])
   }
   lastStream?: StreamSettings
+  /** Moonlight сам теряет связь: пишет «Connection terminated» и закрывается. */
+  drop: () => void = () => undefined
   stream(_host: string, settings: StreamSettings): MoonlightProcess {
     this.lastStream = settings
     this.streams++
@@ -159,10 +161,17 @@ class FakeMoonlight implements MoonlightLike {
       this.apollo.launching--
       if (c && !this.streamHangs) c.connected = true
     }, 150)
-    return fakeProcess(() => {
+    const listeners: ((line: string) => void)[] = []
+    const proc = fakeProcess(() => {
       const me = this.myClient()
       if (me) me.connected = false
     })
+    proc.onLine = (cb) => listeners.push(cb)
+    this.drop = () => {
+      listeners.forEach((cb) => cb('Connection terminated: -1'))
+      proc.kill()
+    }
+    return proc
   }
 }
 
@@ -546,6 +555,23 @@ describe('host ↔ client flow', () => {
     expect(audio.calls.at(-1)?.enabled).toBe(false)
   }, 15000)
 
+  it('keeps the sound routing on when the sound module reports while the host is starting', async () => {
+    const audio = new FakeAudio()
+    const { apollo, host } = setup(4, { audio })
+    cleanups.push(() => host.stop())
+    // Помощник присылает состояние в середине запуска: после настройки звука, но до фазы «running».
+    const closeApp = apollo.closeApp.bind(apollo)
+    apollo.closeApp = async () => {
+      if (audio.routerState) audio.emit('router', audio.routerState)
+      return closeApp()
+    }
+    await host.start()
+    expect(host.getState().phase).toBe('running')
+    expect(host.getState().audio.chatControl).toBe(true)
+    await host.stop()
+    expect(host.getState().audio.chatControl).toBe(false)
+  }, 15000)
+
   it('closes Desktop in Apollo after everyone leaves (removes the virtual monitor)', async () => {
     const { apollo, host, makeClient } = setup(4, { idleCloseMs: 150 })
     cleanups.push(() => host.stop())
@@ -793,6 +819,30 @@ describe('host ↔ client flow', () => {
     expect(moonlight.streams).toBe(1)
     expect(client.getState().phase).toBe('streaming')
   }, 20000)
+
+  it('relaunches Moonlight that lost the connection, also during a signaling drop', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, moonlight } = makeClient('Вася')
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    // Moonlight потерял связь и закрылся, а хост на связи: запускается снова, без нового одобрения.
+    moonlight.drop()
+    await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming' && !client.getState().reconnecting, 8000)
+    // То же, когда одновременно оборвалось сигнальное соединение: запуск — после возвращения к хосту.
+    let dropped = false
+    client.on('state', (st) => {
+      if (st.signalLost && !dropped) {
+        dropped = true
+        moonlight.drop()
+      }
+    })
+    hostSocketOf(host, 'Вася').terminate()
+    await waitFor(() => dropped)
+    await waitFor(() => moonlight.streams === 3 && client.getState().phase === 'streaming' && !client.getState().signalLost, 10000)
+    expect(host.getState().requests).toHaveLength(0)
+  }, 25000)
 
   it('the held place is released if the player does not come back', async () => {
     const { apollo, host, makeClient } = setup(4, { resumeGraceMs: 300 })

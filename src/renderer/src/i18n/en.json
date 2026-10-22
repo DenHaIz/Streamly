@@ -516,6 +516,7 @@
       "noVirtualSink": "Steam Streaming Speakers are needed: install Steam and restart \"I'm the host\".",
       "chatDisabled": "Turned off in the host settings.",
       "noHelper": "Streamly's sound module is missing: reinstall Streamly.",
+      "chatStarting": "The sound module did not respond. Restart \"I'm the host\"; if that doesn't help, save the log archive and send it.",
       "softwareEncoder": "Video is encoded on the CPU: update the graphics driver and restart \"I'm the host\".",
       "wrongGpu": "The wrong GPU encodes: plug the monitor into the graphics card, not the motherboard.",
       "apolloOutdated": "An older Apollo is installed: Streamly ships a newer one. Stop hosting, uninstall Apollo in \"Apps & features\" and press \"I'm the host\" again — Streamly will install the new version (Streamly settings are kept)."

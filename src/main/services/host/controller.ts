@@ -283,6 +283,11 @@ export class HostController extends EventEmitter {
   private reconfiguring = false
   /** Звук идёт через виртуальные колонки, и Discord можно убрать из трансляции. */
   private routingMode = false
+  /**
+   * Звук настроен для хостинга: с конца настройки Apollo и до остановки. Раньше режим считался по фазе,
+   * и событие помощника, пришедшее между настройкой звука и фазой «running», выключало его на весь хостинг.
+   */
+  private audioActive = false
   private lastRouter = ''
   private lastAudioSig = ''
   /** Когда Apollo последний раз видел хоть один поток (для закрытия «Desktop» после ухода всех). */
@@ -519,6 +524,8 @@ export class HostController extends EventEmitter {
   private onStartError(e: unknown, code: ErrorCode): void {
     if (e instanceof Cancelled) return
     this.log('start failed', e)
+    // Хост не запустился: звук возвращается как было.
+    if (this.audioActive) void this.updateAudio(false)
     if (this.phase !== 'error') this.setPhase('error', code, String(e))
   }
 
@@ -737,7 +744,8 @@ export class HostController extends EventEmitter {
    * Маршрутизация звука: включена на время хостинга. Discord уходит мимо трансляции, если об этом
    * просит хоть один игрок (звук у всех общий: Apollo захватывает одно устройство на всех).
    */
-  private async updateAudio(active = this.phase === 'running'): Promise<void> {
+  private async updateAudio(active = this.audioActive): Promise<void> {
+    this.audioActive = active
     const a = this.d.audio
     if (!a?.available) {
       this.routingMode = false
@@ -766,7 +774,7 @@ export class HostController extends EventEmitter {
    * Режим «звук через виртуальные колонки». Apollo выбирает устройство по первой сессии,
    * поэтому, пока кто-то играет, режим не меняем: новые игроки получат те же условия.
    */
-  private recomputeRouting(active = this.phase === 'running'): void {
+  private recomputeRouting(active = this.audioActive): void {
     if (this.appOpen && active) return
     const st = this.d.audio?.routerState
     const next = active && this.d.settings.get().host.chatRouting && !!this.d.audio?.available && !!st?.virtualFound
@@ -1957,7 +1965,9 @@ export class HostController extends EventEmitter {
           ? 'noVirtualSink'
           : audio.unavailable === 'disabled'
             ? 'chatDisabled'
-            : 'noHelper'
+            : audio.unavailable === 'noHelper'
+              ? 'noHelper'
+              : 'chatStarting'
       // Discord мимо трансляции — дополнительная возможность: выключена в настройках — не проблема.
       const status = audio.chatControl && !audio.error ? 'ok' : audio.unavailable === 'disabled' || audio.unavailable === 'noHelper' ? 'skip' : 'warn'
       add('chatRouting', status, hint, audio.error)

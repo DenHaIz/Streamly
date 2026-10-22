@@ -161,7 +161,8 @@ namespace Streamly
                     {
                         // Для диагностики: закрепить вывод процесса за устройством (пустой device — сбросить).
                         string device = Str(c, "device");
-                        string err = PolicyConfig.SetAppDevice(Int(c, "pid"), device.Length > 0 ? device : null);
+                        int hr;
+                        string err = PolicyConfig.SetAppDevice(Int(c, "pid"), device.Length > 0 ? device : null, out hr);
                         if (err != null) throw new Exception(err);
                         return true;
                     }
@@ -290,12 +291,12 @@ namespace Streamly
     // Apollo захватывает звук целиком с одного устройства. Чтобы друзья не слышали в трансляции
     // голосовой чат (и собственный голос), Streamly просит Moonlight не оставлять звук на хосте:
     // Apollo делает устройством по умолчанию виртуальные колонки (Steam Streaming Speakers) и
-    // захватывает их. Помощник в это время:
+    // захватывает их. Помощник:
     //  - закрепляет Discord за настоящими колонками хоста (настройка Windows «звук приложения»),
-    //    поэтому Discord не попадает в трансляцию, а хост его слышит;
-    //  - повторяет звук виртуальных колонок на настоящие (monitor), чтобы хост слышал игру.
-    // Когда трансляция заканчивается, Apollo возвращает устройство по умолчанию, помощник снимает
-    // закрепление Discord и останавливает повтор.
+    //    поэтому Discord не попадает в трансляцию, а хост его слышит. Закрепление ставится заранее,
+    //    пока хостинг включён и об этом просит хоть один игрок, и снимается, когда хостинг выключен;
+    //  - на время трансляции повторяет звук виртуальных колонок на настоящие (monitor), чтобы хост слышал игру.
+    // Когда трансляция заканчивается, Apollo возвращает устройство по умолчанию, и повтор останавливается.
     // ---------------------------------------------------------------------------------------------
     sealed class AudioRouter
     {
@@ -307,8 +308,12 @@ namespace Streamly
         volatile bool stopping;
 
         string physicalId, virtualId, lastError;
+        /** Ошибка перенаправления Discord: своя, чтобы успешная попытка её снимала. */
+        string chatError;
         bool active, monitoring;
         readonly Dictionary<int, bool> routedPids = new Dictionary<int, bool>();
+        /** Устройство, за которым закреплён Discord: сменились настоящие колонки — закрепляем заново. */
+        string routedDevice;
         LoopbackBridge bridge;
         string lastSnapshot = "";
         DateTime nextDeviceScan = DateTime.MinValue;
@@ -356,7 +361,7 @@ namespace Streamly
                 d["active"] = active;
                 d["monitoring"] = monitoring;
                 d["chatExcluded"] = routedPids.Count > 0;
-                d["error"] = lastError;
+                d["error"] = chatError ?? lastError;
                 return d;
             }
         }
@@ -420,8 +425,10 @@ namespace Streamly
                 if (bridge != null && bridge.Error != null) lastError = bridge.Error;
             }
 
-            // Голосовой чат мимо трансляции.
-            bool wantRoute = nowActive && ex;
+            // Голосовой чат мимо трансляции. Закрепляем заранее, пока звук ещё на настоящих колонках: Discord
+            // выбирает устройство в момент, когда Apollo переключает звук на виртуальные колонки, а закрепление,
+            // сделанное после, заметил бы только в следующем звонке. Пока трансляции нет, закрепление на слух ничего не меняет.
+            bool wantRoute = en && ex && physicalId != null;
             if (wantRoute)
             {
                 if (DateTime.UtcNow >= nextProcessScan)
@@ -436,29 +443,52 @@ namespace Streamly
             }
         }
 
+        /**
+         * Закрепляет Discord за настоящими колонками. У Discord много процессов, а звук выводит один-два из них:
+         * Windows принимает закрепление только для процесса со звуковой сессией (остальным отвечает E_INVALIDARG),
+         * поэтому берём процессы, у которых сессия есть. Процесс, который заговорит позже, подхватит следующий проход.
+         */
         void RouteChat(string deviceId)
         {
+            if (deviceId != routedDevice)
+            {
+                lock (sync) routedPids.Clear();
+                routedDevice = deviceId;
+            }
+            var withSound = CoreAudio.SessionPids();
+            string err = null;
             foreach (int pid in ChatPids())
             {
-                if (routedPids.ContainsKey(pid)) continue;
-                string err = PolicyConfig.SetAppDevice(pid, deviceId);
+                if (routedPids.ContainsKey(pid) || !withSound.Contains(pid)) continue;
+                int hr;
+                string e = PolicyConfig.SetAppDevice(pid, deviceId, out hr);
+                // Процесс успел закрыть звук между проверкой и вызовом: не ошибка, повторим.
+                if (e != null && hr == PolicyConfig.E_INVALIDARG) continue;
                 lock (sync)
                 {
-                    if (err == null) routedPids[pid] = true;
-                    else lastError = err;
+                    if (e == null) routedPids[pid] = true;
                 }
+                if (e != null) err = e;
             }
+            if (err != null && err != chatError) Program.Log("chat routing: " + err);
+            lock (sync) chatError = err;
         }
 
         void ClearChatRouting(bool all)
         {
             var pids = new List<int>(routedPids.Keys);
             if (all) pids.AddRange(ChatPids());
-            foreach (int pid in pids) PolicyConfig.SetAppDevice(pid, null);
-            lock (sync) routedPids.Clear();
+            int hr;
+            foreach (int pid in pids) PolicyConfig.SetAppDevice(pid, null, out hr);
+            lock (sync)
+            {
+                routedPids.Clear();
+                chatError = null;
+            }
+            routedDevice = null;
         }
 
-        IEnumerable<int> ChatPids()
+        List<int> ChatPids()
         {
             var list = new List<int>();
             foreach (string name in chatApps)
@@ -467,6 +497,14 @@ namespace Streamly
                 {
                     list.Add(p.Id);
                     p.Dispose();
+                }
+            }
+            // Закрытые процессы больше не держим: их номера Windows может выдать другим программам.
+            lock (sync)
+            {
+                foreach (int pid in new List<int>(routedPids.Keys))
+                {
+                    if (!list.Contains(pid)) routedPids.Remove(pid);
                 }
             }
             return list;
@@ -732,9 +770,12 @@ namespace Streamly
             throw new Exception("AudioPolicyConfig is not available");
         }
 
+        public const int E_INVALIDARG = unchecked((int)0x80070057);
+
         /** Закрепляет вывод приложения за устройством (null — снова «по умолчанию»). Возвращает текст ошибки или null. */
-        public static string SetAppDevice(int pid, string mmDeviceId)
+        public static string SetAppDevice(int pid, string mmDeviceId, out int hr)
         {
+            hr = 0;
             try
             {
                 IntPtr f = Factory();
@@ -752,7 +793,11 @@ namespace Streamly
                     // eRender; роли eConsole и eMultimedia (так делает и окно настроек Windows).
                     int hr1 = set(f, (uint)pid, 0, 0, hs);
                     int hr2 = set(f, (uint)pid, 0, 1, hs);
-                    if (hr1 < 0 || hr2 < 0) return "SetPersistedDefaultAudioEndpoint 0x" + Math.Min(hr1, hr2).ToString("X8");
+                    // eCommunications: голосовые чаты могут выводить звук на «устройство связи по умолчанию».
+                    // Не на всех сборках Windows эта роль принимается, поэтому её ошибку не считаем.
+                    set(f, (uint)pid, 0, 2, hs);
+                    hr = hr1 < 0 ? hr1 : hr2;
+                    if (hr < 0) return "SetPersistedDefaultAudioEndpoint 0x" + hr.ToString("X8");
                 }
                 finally
                 {
@@ -919,6 +964,44 @@ namespace Streamly
             {
                 Marshal.ReleaseComObject(d);
             }
+        }
+
+        /** Процессы, у которых есть звуковая сессия на любом из устройств вывода. */
+        public static HashSet<int> SessionPids()
+        {
+            var set = new HashSet<int>();
+            var en = Enumerator();
+            foreach (IMMDevice d in ActiveRender(en))
+            {
+                try
+                {
+                    Guid iid = typeof(IAudioSessionManager2).GUID;
+                    object o;
+                    if (d.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o) < 0) continue;
+                    var mgr = (IAudioSessionManager2)o;
+                    IAudioSessionEnumerator sessions;
+                    if (mgr.GetSessionEnumerator(out sessions) >= 0)
+                    {
+                        int n;
+                        sessions.GetCount(out n);
+                        for (int i = 0; i < n; i++)
+                        {
+                            object so;
+                            if (sessions.GetSession(i, out so) < 0) continue;
+                            uint sp;
+                            if (((IAudioSessionControl2)so).GetProcessId(out sp) >= 0 && sp != 0) set.Add((int)sp);
+                            Marshal.ReleaseComObject(so);
+                        }
+                        Marshal.ReleaseComObject(sessions);
+                    }
+                    Marshal.ReleaseComObject(mgr);
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(d);
+                }
+            }
+            return set;
         }
 
         /** Громкость всех звуковых сессий процесса на всех устройствах. Возвращает число найденных сессий. */

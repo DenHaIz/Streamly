@@ -73,6 +73,13 @@ export function parseConnectionStatus(line: string): boolean | undefined {
   return m[1] !== '0'
 }
 
+/** Moonlight сам закончил трансляцию из-за потери связи с хостом (а не игрок закрыл окно). */
+export const STREAM_DROPPED = /Connection terminated|lack of video traffic/i
+
+/** Автопереподключений за RECONNECT_WINDOW_MS: больше — связь слишком плохая, показываем ошибку. */
+const RECONNECT_BUDGET = 3
+const RECONNECT_WINDOW_MS = 180_000
+
 /** Разброс задержки: среднее отклонение соседних замеров. */
 export function jitter(samples: number[]): number | undefined {
   if (samples.length < 3) return undefined
@@ -601,7 +608,9 @@ export class ClientController extends EventEmitter {
       .then((wifi) => attempt === this.attempt && this.state.wifi !== wifi && this.set({ wifi }))
       .catch(() => undefined)
     this.streamStartedAt = startedAt
+    let dropped = false
     proc.onLine?.((line) => {
+      if (STREAM_DROPPED.test(line)) dropped = true
       const poor = parseConnectionStatus(line)
       if (poor !== undefined && attempt === this.attempt && this.streamProc === proc) this.onConnectionStatus(poor)
     })
@@ -625,6 +634,13 @@ export class ClientController extends EventEmitter {
       if (this.resuming) {
         // Перезапуск (качество, геймпад, сторож) во время обрыва: запустим, когда хост снова нас пустит.
         if (this.restartPending && this.launchAddress) return
+        // Moonlight сам закончил трансляцию из-за того же обрыва: запустим снова, когда хост нас пустит.
+        if (dropped && this.launchAddress && this.takeReconnect()) {
+          this.log('Moonlight lost the connection during a signaling drop: relaunching when the host is back')
+          this.restartPending = true
+          this.set({ reconnecting: true })
+          return
+        }
         // Игрок сам закрыл Moonlight, пока связь с хостом восстанавливалась: возвращаться больше незачем.
         this.log('Moonlight closed during a signaling drop: not coming back')
         this.teardown()
@@ -636,6 +652,12 @@ export class ClientController extends EventEmitter {
         return this.launch(attempt, this.launchAddress)
       }
       this.restartPending = false
+      // Moonlight потерял связь и закрылся, а хост на связи: запускаем снова, без нового одобрения.
+      if (dropped && this.state.phase === 'streaming' && this.launchAddress && this.ws?.readyState === WebSocket.OPEN && this.takeReconnect()) {
+        this.log('Moonlight lost the connection: reconnecting')
+        this.set({ reconnecting: true })
+        return this.launch(attempt, this.launchAddress)
+      }
       if (this.state.phase === 'launching') {
         // Закрылся, так и не начав стрим: ошибка запуска (подробности — в логе Moonlight).
         return this.fail('stream_failed', [`exit ${code}`, this.d.moonlightLog?.(startedAt)].filter(Boolean).join('\n'))
@@ -675,10 +697,7 @@ export class ClientController extends EventEmitter {
           count = hung ? count + 1 : 0
           if (count < 3 || this.state.phase !== 'streaming') return
           count = 0
-          const now = Date.now()
-          this.reconnects = this.reconnects.filter((t) => now - t < 180_000)
-          if (this.reconnects.length >= 2) return this.fail('stream_failed', 'Moonlight is not responding')
-          this.reconnects.push(now)
+          if (!this.takeReconnect()) return this.fail('stream_failed', 'Moonlight is not responding')
           this.log('Moonlight is not responding: restarting the stream')
           this.set({ reconnecting: true })
           this.restartPending = true
@@ -714,15 +733,12 @@ export class ClientController extends EventEmitter {
       return
     }
     // Хост больше не видит стрим, а Moonlight ещё открыт (например, с окном «соединение потеряно»).
-    // Сначала пробуем переподключиться сами (до 2 раз за 3 минуты), потом показываем ошибку.
+    // Сначала пробуем переподключиться сами (до 3 раз за 3 минуты), потом показываем ошибку.
     const onLost = (): void => {
       // Пока восстанавливается связь с хостом, судить рано: решим, когда он снова пришлёт состояние.
       if (this.resuming) return this.startTimer('lost', 4000, attempt, onLost)
       if (this.state.phase !== 'streaming') return
-      const now = Date.now()
-      this.reconnects = this.reconnects.filter((t) => now - t < 180_000)
-      if (this.reconnects.length < 2 && this.ws?.readyState === WebSocket.OPEN && this.streamProc) {
-        this.reconnects.push(now)
+      if (this.ws?.readyState === WebSocket.OPEN && this.streamProc && this.takeReconnect()) {
         this.log('stream lost: reconnecting')
         this.set({ reconnecting: true })
         this.restartStream(true)
@@ -731,6 +747,15 @@ export class ClientController extends EventEmitter {
       this.fail('connection_lost', this.d.moonlightLog?.(this.streamStartedAt))
     }
     this.startTimer('lost', this.d.streamLostGraceMs ?? 8000, attempt, onLost)
+  }
+
+  /** Автопереподключение из общего бюджета (потеря потока, выход Moonlight, зависание). false — бюджет исчерпан. */
+  private takeReconnect(): boolean {
+    const now = Date.now()
+    this.reconnects = this.reconnects.filter((t) => now - t < RECONNECT_WINDOW_MS)
+    if (this.reconnects.length >= RECONNECT_BUDGET) return false
+    this.reconnects.push(now)
+    return true
   }
 
   private clearTimer(name: TimerName): void {

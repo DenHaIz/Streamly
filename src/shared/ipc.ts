@@ -9,7 +9,7 @@ import type {
   HostDisplay,
   HostState,
   Invite,
-  RadminStatus,
+  NetStatus,
   Settings,
   TrustedFriendView,
   UpdateState,
@@ -24,7 +24,7 @@ export type JoinDecision = 'allow' | 'trust' | 'deny' | 'spectate'
 
 export interface BridgeEvents {
   settings: Settings
-  radmin: RadminStatus
+  net: NetStatus
   hostState: HostState
   clientState: ClientState
   hosts: DiscoveredHost[]
@@ -52,7 +52,7 @@ export type BridgeEvent = keyof BridgeEvents
 export interface StreamlyBridge {
   getSettings(): Promise<Settings>
   updateSettings(patch: DeepPartial<Settings>): Promise<Settings>
-  getRadmin(): Promise<RadminStatus>
+  getNet(): Promise<NetStatus>
   getAppInfo(): Promise<AppInfo>
   openExternal(url: string): Promise<void>
   copyText(text: string): Promise<void>
@@ -173,7 +173,7 @@ export interface StreamlyBridge {
 export const IPC = {
   getSettings: 'settings:get',
   updateSettings: 'settings:update',
-  getRadmin: 'radmin:get',
+  getNet: 'net:get',
   getAppInfo: 'app:info',
   openExternal: 'app:openExternal',
   copyText: 'app:copy',

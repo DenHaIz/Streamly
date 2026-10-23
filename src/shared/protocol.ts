@@ -304,10 +304,20 @@ export function sanitizeNickname(name: string): string {
 
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
-/** Ссылка-приглашение: streamly://join/<адрес>?name=<имя хоста>&code=<код>. */
-export function makeInviteLink(address: string, name: string, code?: string): string {
+const validIp = (a: string): boolean => {
+  const ip = IPV4.exec(a)
+  return !!ip && ip.slice(1).every((n) => Number(n) <= 255)
+}
+
+/**
+ * Ссылка-приглашение: streamly://join/<адрес>?name=<имя хоста>&code=<код>&alt=<другие адреса>.
+ * Основной адрес — Radmin (его понимают и старые версии), адрес ZeroTier — в alt.
+ */
+export function makeInviteLink(address: string, name: string, code?: string, alt: string[] = []): string {
   const q = new URLSearchParams({ name })
   if (code) q.set('code', code)
+  const rest = alt.filter((a) => a !== address)
+  if (rest.length) q.set('alt', rest.join(','))
   return `streamly://join/${address}?${q.toString()}`
 }
 
@@ -316,13 +326,14 @@ export function parseInviteLink(text: string): Invite | null {
   const m = /streamly:\/\/join\/([0-9.]{7,15})(\?[^\s"'<>]*)?/i.exec(text)
   if (!m) return null
   const address = m[1]
-  const ip = IPV4.exec(address)
-  if (!ip || ip.slice(1).some((n) => Number(n) > 255)) return null
+  if (!validIp(address)) return null
   const q = new URLSearchParams(m[2] ?? '')
   const code = q.get('code') ?? undefined
+  const alt = [...new Set((q.get('alt') ?? '').split(',').map((a) => a.trim()))].filter((a) => validIp(a) && a !== address).slice(0, 4)
   return {
     address,
     name: sanitizeNickname(q.get('name') ?? address),
-    code: code && /^[\w-]{8,64}$/.test(code) ? code : undefined
+    code: code && /^[\w-]{8,64}$/.test(code) ? code : undefined,
+    ...(alt.length ? { alt } : {})
   }
 }

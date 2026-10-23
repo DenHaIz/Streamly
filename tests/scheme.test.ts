@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type StreamPolicy } from '@shared/types'
 import { buildStreamArgs, pickBitrate, pickResolution } from '../src/main/services/moonlight/runner'
 import { diagnoseHost, type PortState } from '../src/main/services/net/diagnose'
+import type { NetStatus } from '@shared/types'
 
 const policy: StreamPolicy = { hostAudio: true, maxBitrateKbps: 15000, hostWidth: 1920, hostHeight: 1080, hostFps: 60 }
 const arg = (args: string[], flag: string): string | undefined => {
@@ -39,10 +40,15 @@ describe('stream policy from the host', () => {
 })
 
 describe('connection test', () => {
-  const radmin = { installed: true, connected: true, ip: '26.0.0.2' }
-  const run = (ports: Record<number, PortState>, rtt?: number, extra: Partial<Parameters<typeof diagnoseHost>[1]> = {}) =>
-    diagnoseHost('26.0.0.5', {
-      radmin,
+  const off = { installed: false, connected: false }
+  const net: NetStatus = {
+    radmin: { installed: true, connected: true, ip: '26.0.0.2' },
+    zerotier: off,
+    links: [{ kind: 'radmin', ip: '26.0.0.2', prefix: 8, adapterName: 'Radmin VPN' }]
+  }
+  const run = (ports: Record<number, PortState>, rtt?: number, extra: Partial<Parameters<typeof diagnoseHost>[1]> = {}, address = '26.0.0.5') =>
+    diagnoseHost(address, {
+      net,
       moonlightAvailable: true,
       ping: async () => rtt,
       probe: async (_h, p) => ports[p] ?? 'timeout',
@@ -82,7 +88,23 @@ describe('connection test', () => {
   })
 
   it('no Radmin on this PC', async () => {
-    const r = await run(all('open'), 10, { radmin: { installed: false, connected: false } })
+    const r = await run(all('open'), 10, { net: { radmin: off, zerotier: off, links: [] } })
     expect(r.summary).toBe('noRadmin')
+  })
+
+  it('host over ZeroTier while this PC has no Radmin', async () => {
+    const zt: NetStatus = {
+      radmin: off,
+      zerotier: { installed: true, connected: true, ip: '10.147.17.4' },
+      links: [{ kind: 'zerotier', ip: '10.147.17.4', prefix: 24, adapterName: 'ZeroTier One [abc]' }]
+    }
+    const r = await run(all('open'), 20, { net: zt }, '10.147.17.9')
+    expect(r.summary).toBe('allGood')
+    expect(r.items.find((i) => i.id === 'zerotier')?.status).toBe('ok')
+    expect(r.items.some((i) => i.id === 'radmin')).toBe(false)
+    // Адрес Radmin, а Radmin нет — только ZeroTier: подсказка про обе сети.
+    const r2 = await run(all('timeout'), undefined, { net: zt })
+    expect(r2.summary).toBe('noRadmin')
+    expect(r2.items.find((i) => i.id === 'radmin')?.hint).toBe('radminOrZt')
   })
 })

@@ -22,9 +22,9 @@ import { existsSync, readFileSync } from 'node:fs'
 import { constants as osConstants, cpus, setPriority, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision, type NavTarget } from '@shared/ipc'
-import { inviteMessage } from '@shared/invite'
+import { inviteMessage, inviteParams } from '@shared/invite'
 import type { InputPerms } from '@shared/perms'
-import type { ClientState, DeepPartial, HostDisplay, HostState, HotkeyName, HotkeyStatus, Invite, PadDeviceView, RadminStatus, Settings } from '@shared/types'
+import type { ClientState, DeepPartial, HostDisplay, HostState, HotkeyName, HotkeyStatus, Invite, NetStatus, PadDeviceView, Settings } from '@shared/types'
 import { comboOf } from '@shared/hotkeys'
 import { parseInviteLink } from '@shared/protocol'
 import { SecretsService, SettingsService } from './settings'
@@ -35,8 +35,8 @@ import { ApolloInstaller } from './services/apollo/installer'
 import { HostController } from './services/host/controller'
 import { ClientController } from './services/client/controller'
 import { MoonlightRunner } from './services/moonlight/runner'
-import { detectRadmin } from './services/net/radmin'
-import { probeHosts, radminNeighbors } from './services/net/discovery'
+import { detectNetworks, linkFor, netOnline } from './services/net/vpn'
+import { probeHosts, vpnNeighbors } from './services/net/discovery'
 import { diagnoseHost, probePort } from './services/net/diagnose'
 import { UpdateService } from './services/update/updater'
 import { DailyLog, LOG_RETENTION_DAYS, writeLogArchive, type ZipEntry } from './logger'
@@ -57,7 +57,7 @@ let pendingInvite: Invite | null = parseInviteLink(process.argv.join(' '))
 /** Текст буфера обмена, приглашение из которого уже предлагали (чтобы не спрашивать дважды). */
 let offeredClipboard = ''
 
-/** Адрес для отладки без Radmin (например, IP в обычной локальной сети). */
+/** Адрес для отладки без Radmin и ZeroTier (например, IP в обычной локальной сети). */
 const DEV_IP = process.env.STREAMLY_DEV_IP
 const EXTRA_ALLOWED = (process.env.STREAMLY_ALLOW ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 
@@ -107,7 +107,20 @@ function initLog(dir: string): void {
 }
 
 let win: BrowserWindow | null = null
-let radmin: RadminStatus = detectRadmin()
+/** Имена адаптеров ZeroTier по описанию драйвера (от помощника): подключение в Windows могли переименовать. */
+const ztNames = new Set<string>()
+let net: NetStatus = detectNetworks()
+
+/**
+ * Приглашение с адресом, до которого у этого ПК есть своя сеть: хост с Radmin и ZeroTier даёт оба,
+ * а у друга может быть только одна из них.
+ */
+function localInvite(inv: Invite): Invite {
+  const all = [inv.address, ...(inv.alt ?? [])]
+  const best = all.find((a) => linkFor(a, net.links)) ?? inv.address
+  const alt = all.filter((a) => a !== best)
+  return { ...inv, address: best, ...(alt.length ? { alt } : {}) }
+}
 let quitting = false
 let tray: Tray | null = null
 /** Запуск из автозагрузки Windows: окно не показываем, Streamly ждёт в трее. */
@@ -297,7 +310,7 @@ function createTopWindow(hash: string, opts: { focusable: boolean }): BrowserWin
 void app.whenReady().then(() => {
   const dataDir = app.getPath('userData')
   initLog(dataDir)
-  log(`[radmin] ${JSON.stringify(radmin)}`)
+  log(`[net] ${JSON.stringify(net)}`)
   const cipher: Cipher | undefined = safeStorage.isEncryptionAvailable()
     ? { encrypt: (t) => safeStorage.encryptString(t), decrypt: (b) => safeStorage.decryptString(b) }
     : undefined
@@ -313,7 +326,8 @@ void app.whenReady().then(() => {
     secrets,
     apollo,
     installer,
-    address: () => radmin.ip ?? DEV_IP,
+    address: () => net.links[0]?.ip ?? DEV_IP,
+    links: () => net.links,
     appVersion,
     extraAllowed: EXTRA_ALLOWED,
     displayMode: () => {
@@ -350,8 +364,9 @@ void app.whenReady().then(() => {
       const d = screen.getPrimaryDisplay()
       return { width: Math.round(d.size.width * d.scaleFactor), height: Math.round(d.size.height * d.scaleFactor), fps: Math.round(d.displayFrequency || 60) }
     },
-    probe: (targets, onFound) => probeHosts({ localIp: radmin.ip, targets, broadcast: !!radmin.ip, onFound }),
-    neighbors: () => (radmin.ip ? radminNeighbors(radmin.ip) : Promise.resolve([])),
+    probe: (targets, onFound) => probeHosts({ links: net.links, targets, onFound }),
+    neighbors: async () => (await Promise.all(net.links.map((l) => vpnNeighbors(l).catch((): string[] => [])))).flat(),
+    linkKind: (address) => linkFor(address, net.links)?.kind,
     moonlightLog: (since) => moonlight.logTail(since),
     wifi: async () => (helper.available ? !!internetAdapter(await helper.netInfo())?.wifi : false),
     isHung: async (pid) => (helper.available ? helper.hung(pid) : false),
@@ -792,7 +807,7 @@ void app.whenReady().then(() => {
     const inv = host.createInvite()
     const hs = host.getState()
     if (!inv || !hs.address) return
-    clipboard.writeText(inviteMessage(settings.get().language, { name: hs.hostName, address: hs.address, link: inv.link }))
+    clipboard.writeText(inviteMessage(settings.get().language, inviteParams(hs, inv.link)))
     trayBalloon(settings.get().language === 'ru' ? 'Приглашение скопировано — отправьте его друзьям' : 'Invite copied — send it to your friends')
   }
   const trayBalloon = (content: string): void => notify(content, showWindow, true)
@@ -853,7 +868,7 @@ void app.whenReady().then(() => {
         { label: L('Остановить хост', 'Stop hosting'), click: () => void host.stop() }
       )
     } else if (!inSession && (hs.phase === 'idle' || hs.phase === 'error')) {
-      items.push({ label: L('Стать хостом', 'Start hosting'), enabled: !!(radmin.connected || DEV_IP), click: () => (navigate('host'), void host.start()) })
+      items.push({ label: L('Стать хостом', 'Start hosting'), enabled: !!(netOnline(net) || DEV_IP), click: () => (navigate('host'), void host.start()) })
       const recent = settings.get().recentHosts.slice(0, 5)
       items.push({
         label: L('Подключиться', 'Connect'),
@@ -930,7 +945,7 @@ void app.whenReady().then(() => {
       us.status === 'downloading' ? Math.floor((us.percent ?? 0) / 10) : 0,
       updates.offered,
       settings.get().recentHosts.map((h) => h.address),
-      radmin.connected
+      netOnline(net)
     ])
     if (sig === traySig) return
     traySig = sig
@@ -972,14 +987,32 @@ void app.whenReady().then(() => {
   settings.on('change', refreshTray)
   updates.on('state', refreshTray)
 
-  setInterval(() => {
-    const next = detectRadmin()
-    if (JSON.stringify(next) !== JSON.stringify(radmin)) {
-      radmin = next
-      log(`[radmin] ${JSON.stringify(radmin)}`)
-      broadcast('radmin', radmin)
+  const refreshNet = (): NetStatus => {
+    const next = detectNetworks(undefined, ztNames)
+    if (JSON.stringify(next) !== JSON.stringify(net)) {
+      net = next
+      log(`[net] ${JSON.stringify(net)}`)
+      broadcast('net', net)
+      // Запустили ZeroTier (или Radmin получил адрес), пока хост работает: слушаем и на новом адресе.
+      void host.syncNetworks().catch((e: unknown) => log('syncNetworks failed', e instanceof Error ? e.message : e))
     }
-  }, 4000)
+    return net
+  }
+  setInterval(refreshNet, 4000)
+  // Адаптеры ZeroTier по описанию драйвера (на случай переименованного подключения): раз в минуту хватает.
+  // Только если ZeroTier установлен: иначе помощник запускался бы у всех ради пустого ответа.
+  const ztDir = join(process.env.ProgramData ?? 'C:\\ProgramData', 'ZeroTier', 'One')
+  const refreshZtNames = async (): Promise<void> => {
+    if (!helper.available || !existsSync(ztDir)) return
+    const list = await helper.netInfo().catch(() => null)
+    // Помощник не ответил — оставляем прежние имена, а не теряем переименованный адаптер на минуту.
+    if (!list) return
+    ztNames.clear()
+    for (const a of list) if (/zerotier/i.test(a.description)) ztNames.add(a.name)
+    refreshNet()
+  }
+  void refreshZtNames()
+  setInterval(() => void refreshZtNames(), 60_000)
 
   const trusted = (e: IpcMainInvokeEvent): boolean => {
     const url = e.senderFrame?.url ?? ''
@@ -993,7 +1026,7 @@ void app.whenReady().then(() => {
   }
   handle(IPC.getSettings, () => settings.get())
   handle(IPC.updateSettings, (patch: DeepPartial<Settings>) => settings.update(patch))
-  handle(IPC.getRadmin, () => (radmin = detectRadmin()))
+  handle(IPC.getNet, () => refreshNet())
   handle(IPC.getAppInfo, () => ({
     version: appVersion,
     moonlightAvailable: moonlight.available,
@@ -1080,15 +1113,16 @@ void app.whenReady().then(() => {
     if (pendingInvite) {
       const inv = pendingInvite
       pendingInvite = null
-      return inv
+      return localInvite(inv)
     }
     // Discord не делает ссылки streamly:// кликабельными: приглашение, скопированное в буфер, Streamly замечает сам.
     const text = String(await clipboard.readText()).slice(0, 2000)
     const inv = parseInviteLink(text)
     // Своё же приглашение (хост скопировал его друзьям) не предлагаем.
-    if (!inv || text === offeredClipboard || inv.address === radmin.ip) return null
+    const own = new Set(net.links.map((l) => l.ip))
+    if (!inv || text === offeredClipboard || [inv.address, ...(inv.alt ?? [])].some((a) => own.has(a))) return null
     offeredClipboard = text
-    return inv
+    return localInvite(inv)
   })
   /** Отчёт для разбора проблем: версии, сеть, состояние (без паролей и токенов) и хвост журнала. */
   const diagnosticsReport = (): string => {
@@ -1096,7 +1130,7 @@ void app.whenReady().then(() => {
     const s = settings.get()
     return [
       `Streamly ${appVersion} · Windows ${process.getSystemVersion()} · Electron ${process.versions.electron}`,
-      `Radmin: ${JSON.stringify(radmin)}`,
+      `Networks: ${JSON.stringify(net)}`,
       `Moonlight: ${moonlight.available ? 'ok' : 'missing'} · Apollo bundled: ${installer.hasBundledInstaller}`,
       `Host: ${JSON.stringify({ ...host.getState(), players: host.getState().players.map((p) => ({ n: p.nickname, s: p.status, a: p.address })) })}`,
       `Client: ${JSON.stringify(client.getState())}`,
@@ -1161,7 +1195,7 @@ void app.whenReady().then(() => {
   handle(IPC.clientDiagnose, async (address: string) => {
     const a = String(address).trim()
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) return { target: a, items: [], summary: 'badAddress' }
-    const report = await diagnoseHost(a, { radmin: (radmin = detectRadmin()), moonlightAvailable: moonlight.available })
+    const report = await diagnoseHost(a, { net: refreshNet(), moonlightAvailable: moonlight.available })
     log(`[diag] ${a}: ${report.summary} ${report.items.map((i) => `${i.id}=${i.status}${i.value ? `(${i.value})` : ''}`).join(' ')}`)
     return report
   })
@@ -1208,13 +1242,13 @@ void app.whenReady().then(() => {
   // Если прошлый запуск завершился аварийно, у друзей в Apollo могли остаться права.
   // Режим хоста при старте включаем уже после этой блокировки.
   void host.lockdownOnBoot().then(() => {
-    if (settings.get().host.autoStartHosting && (radmin.connected || DEV_IP)) void host.start()
+    if (settings.get().host.autoStartHosting && (netOnline(net) || DEV_IP)) void host.start()
   })
 
   app.on('second-instance', (_e, argv) => {
     showWindow()
     const inv = parseInviteLink(argv.join(' '))
-    if (inv) broadcast('invite', inv)
+    if (inv) broadcast('invite', localInvite(inv))
   })
 
   // Перед выходом снимаем права у всех и закрываем стримы.

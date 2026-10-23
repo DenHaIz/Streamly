@@ -2,7 +2,7 @@ import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
 import { Check, Gamepad, Hand, Send, Tv, Users, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { inviteMessage } from '@shared/invite'
+import { inviteMessage, inviteParams } from '@shared/invite'
 import { useApp } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { useResolvedTheme } from '@/lib/theme'
@@ -47,7 +47,7 @@ export function HostMenu() {
     try {
       const inv = await api().host.createInvite()
       if (!inv) throw new Error('no invite')
-      await api().copyText(inviteMessage(i18n.language === 'en' ? 'en' : 'ru', { name: host.hostName, address: host.address, link: inv.link }))
+      await api().copyText(inviteMessage(i18n.language === 'en' ? 'en' : 'ru', inviteParams(host, inv.link)))
       toast({ tone: 'success', text: t('host.inviteCopiedShort') })
     } catch {
       toast({ tone: 'danger', text: t('hostMenu.inviteFailed') })

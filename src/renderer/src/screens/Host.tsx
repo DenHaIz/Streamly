@@ -32,7 +32,7 @@ import {
   X
 } from 'lucide-react'
 import { memo, useEffect, useRef, useState, type ReactNode, type Ref } from 'react'
-import { inviteMessage } from '@shared/invite'
+import { inviteMessage, inviteParams } from '@shared/invite'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
 import type { HostState, JoinRequestView, PlayerView } from '@shared/types'
@@ -47,7 +47,8 @@ const VIGEM_URL = 'https://github.com/nefarius/ViGEmBus/releases'
 
 export function Host() {
   const host = useApp((s) => s.host)
-  const radmin = useApp((s) => s.radmin)
+  // Хватает любой сети: Radmin или ZeroTier.
+  const online = useApp((s) => s.net.links.length > 0)
   // true, пока запуск запрошен, а хост ещё не ушёл из 'idle' (чтобы не мигала карточка «остановлен»).
   const [starting, setStarting] = useState(false)
   const { t } = useTranslation()
@@ -61,16 +62,16 @@ export function Host() {
       .finally(() => setStarting(false))
   }
 
-  // Заходя на экран (или когда появилась сеть Radmin), сразу запускаем хост: пользователь уже нажал «Я хост».
+  // Заходя на экран (или когда появилась сеть Radmin или ZeroTier), сразу запускаем хост: пользователь уже нажал «Я хост».
   // Только при входе: после «Остановить» экран не должен перезапускать хост сам.
   useEffect(() => {
     const h = useApp.getState().host
     const waitingForRadmin = h?.phase === 'error' && h.error === 'no_radmin'
-    if (radmin.connected && (!h || h.phase === 'idle' || waitingForRadmin)) start()
-  }, [radmin.connected])
+    if (online && (!h || h.phase === 'idle' || waitingForRadmin)) start()
+  }, [online])
 
   let body: ReactNode
-  if (!radmin.connected && host?.phase !== 'running') {
+  if (!online && host?.phase !== 'running') {
     body = (
       <motion.div key="radmin" className="card card-pad center-card" {...fade}>
         <RadminHelp />
@@ -312,7 +313,7 @@ function Dashboard({ host }: { host: HostState }) {
   // Готовый текст-приглашение: что сделать другу, чтобы подключиться.
   const invite = async (): Promise<void> => {
     const inv = await api().host.createInvite()
-    void api().copyText(inviteMessage(i18n.language === 'en' ? 'en' : 'ru', { name: host.hostName, address: host.address ?? '', link: inv?.link ?? '' }))
+    void api().copyText(inviteMessage(i18n.language === 'en' ? 'en' : 'ru', inviteParams(host, inv?.link ?? '')))
     toast({ tone: 'success', text: t('host.inviteCopied') }, 6000)
   }
   const stop = (): void => {
@@ -364,7 +365,21 @@ function Dashboard({ host }: { host: HostState }) {
       <motion.div className="host-grid" variants={stagger} initial="hidden" animate="show">
         <motion.div variants={riseIn} className="card card-pad address-card">
           <div className="section-title">{t('host.yourAddress')}</div>
-          {host.address && <CopyAddress address={host.address} />}
+          {host.addresses && host.addresses.length > 1 ? (
+            // Хост и в Radmin, и в ZeroTier: друг берёт адрес той сети, в которой он сам.
+            <div style={{ display: 'grid', gap: 8 }}>
+              {host.addresses.map((a) => (
+                <div key={a.ip}>
+                  <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>
+                    {a.kind === 'zerotier' ? 'ZeroTier' : 'Radmin VPN'}
+                  </div>
+                  <CopyAddress address={a.ip} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            host.address && <CopyAddress address={host.address} />
+          )}
           <p className="faint" style={{ margin: '10px 0 0', fontSize: 12.5 }}>
             {t('host.addressHint')}
           </p>

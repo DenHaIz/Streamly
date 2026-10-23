@@ -346,13 +346,31 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
   hotkeys: { ...DEFAULT_HOTKEYS }
 }
 
-export interface RadminStatus {
-  /** Найден виртуальный адаптер Radmin VPN. */
+/** Виртуальная сеть для игры: Radmin VPN (основная) или ZeroTier (запасная). */
+export type VpnKind = 'radmin' | 'zerotier'
+
+export interface VpnStatus {
+  /** Найден виртуальный адаптер этой сети. */
   installed: boolean
-  /** У адаптера есть адрес 26.x.x.x. */
+  /** У адаптера есть адрес (Radmin — 26.x.x.x, ZeroTier — выданный сетью). */
   connected: boolean
   ip?: string
   adapterName?: string
+}
+
+/** Адрес этого ПК в одной из сетей: ip/prefix — подсеть, из которой принимаем друзей. */
+export interface VpnLink {
+  kind: VpnKind
+  ip: string
+  prefix: number
+  adapterName: string
+}
+
+export interface NetStatus {
+  radmin: VpnStatus
+  zerotier: VpnStatus
+  /** Все адреса в сетях для игры, Radmin первым. Пусто — играть не через что. */
+  links: VpnLink[]
 }
 
 export type ErrorCode =
@@ -441,7 +459,10 @@ export interface HostState {
   phase: HostPhase
   error?: ErrorCode
   errorDetail?: string
+  /** Основной адрес хоста (Radmin, если есть). */
   address?: string
+  /** Все адреса хоста по сетям (Radmin и ZeroTier): друзья подключаются через любую общую сеть. */
+  addresses?: { kind: VpnKind; ip: string }[]
   hostName: string
   maxPlayers: number
   players: PlayerView[]
@@ -453,7 +474,7 @@ export interface HostState {
   pendingRestart: boolean
   /** Кодировщик видео (после первого запуска Apollo). */
   encoder?: HostEncoder
-  /** Исходящий поток хоста по адаптеру сети Radmin, Мбит/с. */
+  /** Исходящий поток хоста по адаптерам сетей для игры (Radmin, ZeroTier), Мбит/с. */
   uploadMbps?: number
   /** Хост временно забрал ввод у всех игроков. */
   inputPaused: boolean
@@ -539,6 +560,8 @@ export interface ClientState {
 /** Ссылка-приглашение streamly://join/... */
 export interface Invite {
   address: string
+  /** Другие адреса хоста (ZeroTier, если основной — Radmin): клиент выбирает тот, до которого есть своя сеть. */
+  alt?: string[]
   name: string
   code?: string
 }

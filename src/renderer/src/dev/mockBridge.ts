@@ -1,7 +1,7 @@
 // Фейковый API основного процесса для разработки интерфейса в браузере (npm run dev:web).
 // Имитирует хост с входящими запросами и клиент с поиском и подключением.
 import type { BridgeEvent, BridgeEvents, StreamlyBridge } from '@shared/ipc'
-import type { ClientState, DiscoveredHost, HostDisplay, HostState, Settings, TrustedFriendView, UpdateState } from '@shared/types'
+import type { ClientState, DiscoveredHost, HostDisplay, HostState, NetStatus, Settings, TrustedFriendView, UpdateState, VpnStatus } from '@shared/types'
 import { NO_INPUT } from '@shared/perms'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { MotionGlobalConfig } from 'framer-motion'
@@ -22,7 +22,17 @@ let settings: Settings = {
   nickname: 'Алексей',
   deviceId: '00000000-0000-4000-8000-000000000000'
 }
-const radmin = params.get('radmin') === '0' ? { installed: true, connected: false } : { installed: true, connected: true, ip: '26.14.88.201', adapterName: 'Radmin VPN' }
+// ?radmin=0 — Radmin не подключён, ?zt=1 — подключён ZeroTier.
+const radmin: VpnStatus = params.get('radmin') === '0' ? { installed: true, connected: false } : { installed: true, connected: true, ip: '26.14.88.201', adapterName: 'Radmin VPN' }
+const zerotier: VpnStatus = params.get('zt') === '1' ? { installed: true, connected: true, ip: '10.147.17.4', adapterName: 'ZeroTier One [8056c2e21c000001]' } : { installed: false, connected: false }
+const net: NetStatus = {
+  radmin,
+  zerotier,
+  links: [
+    ...(radmin.ip ? [{ kind: 'radmin' as const, ip: radmin.ip, prefix: 8, adapterName: 'Radmin VPN' }] : []),
+    ...(zerotier.ip ? [{ kind: 'zerotier' as const, ip: zerotier.ip, prefix: 24, adapterName: zerotier.adapterName ?? '' }] : [])
+  ]
+}
 
 let host: HostState = {
   phase: 'idle',
@@ -31,7 +41,8 @@ let host: HostState = {
   players: [],
   requests: [],
   gamepadDriver: true,
-  address: radmin.ip,
+  address: net.links[0]?.ip,
+  addresses: net.links.map((l) => ({ kind: l.kind, ip: l.ip })),
   audio: { chatControl: true, chatExcluded: false, monitoring: false },
   pendingRestart: false,
   inputPaused: false,
@@ -123,7 +134,7 @@ const bridge: StreamlyBridge = {
     emit('settings', settings)
     return settings
   },
-  getRadmin: async () => radmin,
+  getNet: async () => net,
   getAppInfo: async () => ({ version: '0.1.0-dev', moonlightAvailable: true, apolloBundled: true, apolloInstalled: false, platform: 'web' }),
   openExternal: async (url) => void window.open(url, '_blank'),
   copyText: async (text) => void navigator.clipboard?.writeText(text).catch(() => undefined),

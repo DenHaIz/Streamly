@@ -40,7 +40,8 @@ try {
   }
   if ($Firewall) {
     Get-NetFirewallRule -DisplayName '${FIREWALL_RULE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    # Только порты Streamly и только из сети Radmin (и локальной подсети для отладки).
+    # Только порты Streamly и только из сети Radmin и подсетей своих адаптеров: LocalSubnet — это и подсеть
+    # ZeroTier (адрес выдаёт его сеть, заранее неизвестен), и локальная сеть для отладки.
     $remote = @('26.0.0.0/8', 'LocalSubnet')
     New-NetFirewallRule -DisplayName '${FIREWALL_RULE}' -Direction Inbound -Action Allow -Program $Program -Protocol TCP -LocalPort ${SIGNALING_PORT} -RemoteAddress $remote -Profile Any | Out-Null
     New-NetFirewallRule -DisplayName '${FIREWALL_RULE}' -Direction Inbound -Action Allow -Program $Program -Protocol UDP -LocalPort ${DISCOVERY_PORT} -RemoteAddress $remote -Profile Any | Out-Null

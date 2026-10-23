@@ -1,8 +1,8 @@
 import { Socket } from 'node:net'
 import { SIGNALING_PORT } from '@shared/protocol'
-import type { CheckItem, CheckReport, RadminStatus } from '@shared/types'
+import type { CheckItem, CheckReport, NetStatus } from '@shared/types'
 import { run } from '../../elevate'
-import { isRadminIp } from './radmin'
+import { isRadminIp, linkFor } from './vpn'
 
 export type PortState = 'open' | 'refused' | 'timeout'
 
@@ -36,7 +36,7 @@ export const RELAY_RTT_MS = 80
 const APOLLO_PORTS = [47984, 47989, 48010]
 
 export interface DiagnoseDeps {
-  radmin: RadminStatus
+  net: NetStatus
   moonlightAvailable: boolean
   probe?: typeof probePort
   ping?: typeof pingHost
@@ -54,8 +54,13 @@ export async function diagnoseHost(address: string, d: DiagnoseDeps): Promise<Ch
     items.push({ id, status, hint: status === 'ok' ? undefined : hint, value })
   }
 
-  add('radmin', d.radmin.connected ? 'ok' : 'fail', 'radmin', d.radmin.ip)
-  add('radminAddress', isRadminIp(address) ? 'ok' : 'warn', 'notRadminAddress', address)
+  // Через какую сеть идём к хосту: адрес Radmin (26.x) или подсеть своего ZeroTier.
+  const link = linkFor(address, d.net.links)
+  const viaZt = link?.kind === 'zerotier'
+  const online = viaZt || d.net.radmin.connected || (!isRadminIp(address) && d.net.links.length > 0)
+  if (viaZt) add('zerotier', 'ok', 'zerotier', link.ip)
+  else add('radmin', d.net.radmin.connected ? 'ok' : 'fail', d.net.links.length ? 'radminOrZt' : 'radmin', d.net.radmin.ip ?? d.net.links[0]?.ip)
+  add('radminAddress', link || isRadminIp(address) ? 'ok' : 'warn', d.net.zerotier.connected ? 'notInZtNetwork' : 'notRadminAddress', address)
   add('moonlight', d.moonlightAvailable ? 'ok' : 'fail', 'moonlight')
 
   const [rtt, streamly, ...apollo] = await Promise.all([
@@ -82,7 +87,7 @@ export async function diagnoseHost(address: string, d: DiagnoseDeps): Promise<Ch
   )
 
   let summary = 'allGood'
-  if (!d.radmin.connected) summary = 'noRadmin'
+  if (!online) summary = 'noRadmin'
   else if (!reachable) summary = 'noRoute'
   else if (streamly === 'refused') summary = 'notHosting'
   else if (streamly !== 'open') summary = 'streamlyBlocked'

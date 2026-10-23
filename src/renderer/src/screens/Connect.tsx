@@ -17,12 +17,12 @@ const NETWORK_ERRORS = new Set<ErrorCode>(['host_unreachable', 'host_not_hosting
 
 export function Connect() {
   const client = useApp((s) => s.client)
-  const radmin = useApp((s) => s.radmin)
+  const online = useApp((s) => s.net.links.length > 0)
   let body
   if (ACTIVE.includes(client.phase)) body = <Progress key="progress" client={client} />
   else if (client.phase === 'streaming') body = <Streaming key="streaming" client={client} />
   else if (client.phase === 'error' || client.phase === 'ended') body = <Result key="result" client={client} />
-  else if (!radmin.connected) body = <NoRadmin key="radmin" />
+  else if (!online) body = <NoRadmin key="radmin" />
   else body = <HostList key="list" />
   return (
     <div className="page-inner">

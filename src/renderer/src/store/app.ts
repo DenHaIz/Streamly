@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, HotkeyName, HotkeyStatus, Invite, RadminStatus, Settings, UpdateState } from '@shared/types'
+import type { AppInfo, ClientState, DeepPartial, DiscoveredHost, HostState, HotkeyName, HotkeyStatus, Invite, NetStatus, Settings, UpdateState } from '@shared/types'
 import { api } from '@/lib/bridge'
 import i18n, { setLanguage } from '@/i18n'
 import { playChime } from '@/lib/sound'
@@ -28,7 +28,8 @@ interface AppStore {
   direction: 1 | -1
   history: Screen[]
   settings: Settings | null
-  radmin: RadminStatus
+  /** Сети для игры: Radmin VPN и ZeroTier. */
+  net: NetStatus
   appInfo: AppInfo | null
   host: HostState | null
   client: ClientState
@@ -65,7 +66,7 @@ export const useApp = create<AppStore>((set, get) => ({
   direction: 1,
   history: [],
   settings: null,
-  radmin: { installed: false, connected: false },
+  net: { radmin: { installed: false, connected: false }, zerotier: { installed: false, connected: false }, links: [] },
   appInfo: null,
   host: null,
   client: { phase: 'idle' },
@@ -87,9 +88,9 @@ export const useApp = create<AppStore>((set, get) => ({
 
   async init() {
     const b = api()
-    const [settings, radmin, appInfo, host, client, hosts, update] = await Promise.all([
+    const [settings, net, appInfo, host, client, hosts, update] = await Promise.all([
       b.getSettings(),
-      b.getRadmin(),
+      b.getNet(),
       b.getAppInfo(),
       b.host.getState(),
       b.client.getState(),
@@ -103,7 +104,7 @@ export const useApp = create<AppStore>((set, get) => ({
       if (s.language !== get().settings?.language) setLanguage(s.language)
       set({ settings: s })
     })
-    b.on('radmin', (r) => set({ radmin: r }))
+    b.on('net', (n) => set({ net: n }))
     b.on('hostState', (h) => set({ host: h }))
     b.on('clientState', (c) => set({ client: c }))
     b.on('hosts', (h) => set({ hosts: h }))
@@ -140,7 +141,7 @@ export const useApp = create<AppStore>((set, get) => ({
       if (to === 'settings') set({ settingsTab: 'general' })
       get().go(to)
     })
-    set({ settings, radmin, appInfo, host, client, hosts, update, ready: true, screen: settings.onboarded ? 'home' : 'onboarding' })
+    set({ settings, net, appInfo, host, client, hosts, update, ready: true, screen: settings.onboarded ? 'home' : 'onboarding' })
   },
 
   go(screen) {

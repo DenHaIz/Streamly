@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { NO_INPUT, type InputPerms } from '@shared/perms'
 import { parseHostMessage, PROTOCOL_VERSION, SIGNALING_PORT, type ClientMessage, type HostMessage } from '@shared/protocol'
-import type { ClientState, DiscoveredHost, ErrorCode, HostSource, QualityProfile, StreamPolicy, StreamSettings } from '@shared/types'
+import type { ClientState, DiscoveredHost, ErrorCode, HostSource, QualityProfile, StreamPolicy, StreamSettings, VpnKind } from '@shared/types'
 import type { SecretsService, SettingsService } from '../../settings'
 import { streamParams, type MoonlightProcess } from '../moonlight/runner'
 import { autoProfile, lowerProfile, profileForBitrate, relaySuspect } from './quality'
@@ -16,6 +16,7 @@ import {
   NET_MEMORY_TTL_MS,
   probeTarget,
   startBitrate,
+  ZEROTIER_PACKET,
   type DecoderCaps,
   type ProbeOutcome
 } from '@shared/netprobe'
@@ -73,6 +74,8 @@ export interface ClientDeps {
   resumeWindowMs?: number
   /** Какие кодеки видеокарта этого ПК декодирует аппаратно (для выбора HEVC или AV1). */
   decoders?: () => Promise<DecoderCaps | undefined>
+  /** Через какую свою сеть идём к адресу (Radmin, ZeroTier) — для размера видеопакета. */
+  linkKind?: (address: string) => VpnKind | undefined
   /** Пинги до хоста по UDP (слежение за перегрузкой), мс. */
   pingIntervalMs?: number
   /** Сколько связь должна идти без проблем, чтобы запомнить битрейт удачным. */
@@ -220,7 +223,12 @@ export class ClientController extends EventEmitter {
   // ---------- Поиск ----------
 
   getHosts(): DiscoveredHost[] {
-    return [...this.hosts.values()].sort((a, b) => Number(b.online) - Number(a.online) || b.lastSeen - a.lastSeen)
+    const all = [...this.hosts.values()]
+    const kind = (h: DiscoveredHost) => this.d.linkKind?.(h.address)
+    // Хост и в Radmin, и в ZeroTier отвечает с обоих адресов: показываем один раз, через Radmin (основная сеть).
+    const twin = (h: DiscoveredHost): boolean =>
+      h.online && kind(h) === 'zerotier' && all.some((o) => o !== h && o.online && o.name === h.name && o.maxSlots === h.maxSlots && kind(o) === 'radmin')
+    return all.filter((h) => !twin(h)).sort((a, b) => Number(b.online) - Number(a.online) || b.lastSeen - a.lastSeen)
   }
 
   private upsertHost(h: Omit<DiscoveredHost, 'lastSeen'>): void {
@@ -675,8 +683,14 @@ export class ClientController extends EventEmitter {
       priority: chosen.priority,
       yuv444: chosen.yuv444
     })
-    const stream = codec === chosen.codec ? chosen : { ...chosen, codec }
+    let stream = codec === chosen.codec ? chosen : { ...chosen, codec }
     if (codec !== chosen.codec) this.log(`codec: ${codec}${constrained ? ' (bitrate limited by the channel)' : ''}`)
+    // Через ZeroTier Moonlight считает сеть локальной и взял бы пакеты по 1392 байта: ZeroTier порезал бы их
+    // на два фрагмента. Размер, выбранный вручную, не трогаем.
+    if (stream.packetSize === 0 && this.d.linkKind?.(address) === 'zerotier') {
+      stream = { ...stream, packetSize: ZEROTIER_PACKET }
+      this.log(`via ZeroTier: video packets of ${ZEROTIER_PACKET} bytes`)
+    }
     const startedAt = Date.now()
     const proc = this.d.moonlight.stream(address, stream, native, this.state.policy)
     this.streamProc = proc

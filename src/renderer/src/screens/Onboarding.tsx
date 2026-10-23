@@ -5,13 +5,13 @@ import { useTranslation } from 'react-i18next'
 import type { Lang, ThemePref } from '@shared/types'
 import { useApp } from '@/store/app'
 import { Button, riseIn, Segmented, stagger } from '@/components/ui'
-import { RadminHelp } from '@/components/RadminBadge'
+import { netLabel, RadminHelp } from '@/components/RadminBadge'
 import { PixelLogo } from '@/components/PixelLogo'
 
 export function Onboarding() {
   const { t } = useTranslation()
   const settings = useApp((s) => s.settings)!
-  const radmin = useApp((s) => s.radmin)
+  const net = useApp((s) => s.net)
   const update = useApp((s) => s.updateSettings)
   const go = useApp((s) => s.go)
   const [nick, setNick] = useState(settings.nickname)
@@ -77,10 +77,10 @@ export function Onboarding() {
 
         <motion.div variants={riseIn} className="card card-pad">
           <div className="section-title">{t('onboarding.network')}</div>
-          {radmin.connected ? (
+          {net.links.length > 0 ? (
             <div className="pill pill-success" style={{ height: 34, padding: '0 14px' }}>
               <span className="dot pulse" />
-              {t('radmin.connected', { ip: radmin.ip })}
+              {netLabel(net, t)}
             </div>
           ) : (
             <RadminHelp compact />

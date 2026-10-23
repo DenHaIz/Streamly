@@ -608,6 +608,9 @@ function About() {
           <Button size="sm" onClick={() => void api().openExternal('https://www.radmin-vpn.com/')}>
             Radmin VPN
           </Button>
+          <Button size="sm" onClick={() => void api().openExternal('https://www.zerotier.com/download/')}>
+            ZeroTier
+          </Button>
         </div>
       </AdvancedCard>
     </div>

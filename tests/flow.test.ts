@@ -12,7 +12,7 @@ import type { RouterOptions, RouterState } from '../src/main/services/helper/hel
 import { HostController } from '../src/main/services/host/controller'
 import { ClientController, type ClientDeps, type MoonlightLike } from '../src/main/services/client/controller'
 import type { MoonlightProcess } from '../src/main/services/moonlight/runner'
-import type { StreamSettings } from '@shared/types'
+import type { StreamSettings, VpnLink } from '@shared/types'
 import { SecretsService, SettingsService } from '../src/main/settings'
 
 class FakeApollo implements ApolloLike {
@@ -806,6 +806,87 @@ describe('host ↔ client flow', () => {
     expect(c.moonlight.lastStream?.codec).toBe('H.264')
   }, 20000)
 
+  it('streams over ZeroTier with 1280-byte video packets and leaves Radmin as it was', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    // Через Radmin — как в 0.6.1: размер пакета выбирает Moonlight.
+    const a = makeClient('Вася', { extra: { linkKind: () => 'radmin' } })
+    cleanups.push(() => a.client.cancel())
+    await joined(host, a.client)
+    expect(a.moonlight.lastStream?.packetSize).toBe(0)
+    const z = makeClient('Петя', { extra: { linkKind: () => 'zerotier' } })
+    cleanups.push(() => z.client.cancel())
+    await joined(host, z.client)
+    expect(z.moonlight.lastStream?.packetSize).toBe(1280)
+    // Размер, выбранный вручную, не трогаем.
+    const m = makeClient('Коля', { extra: { linkKind: () => 'zerotier' } })
+    m.settings.update({ stream: { packetSize: 1024 } })
+    cleanups.push(() => m.client.cancel())
+    await joined(host, m.client)
+    expect(m.moonlight.lastStream?.packetSize).toBe(1024)
+  }, 20000)
+
+  it('listens on every network address of the host and follows a network that appears later', async () => {
+    let links: VpnLink[] = []
+    const { host, makeClient } = setup(4, { links: () => links })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const servers = (): string[] => [...(host as unknown as { servers: Map<string, unknown> }).servers.keys()]
+    expect(servers()).toEqual(['127.0.0.1'])
+    // Запустили ZeroTier во время хостинга (здесь — второй адрес петли).
+    links = [{ kind: 'zerotier', ip: '127.0.0.2', prefix: 8, adapterName: 'ZeroTier One [t]' }]
+    await host.syncNetworks()
+    expect(servers()).toEqual(['127.0.0.1', '127.0.0.2'])
+    expect(host.getState().addresses).toEqual([
+      { ip: '127.0.0.1', kind: 'radmin' },
+      { ip: '127.0.0.2', kind: 'zerotier' }
+    ])
+    expect(host.createInvite()?.link).toContain('alt=127.0.0.2')
+    // Друг входит через второй адрес.
+    const a = makeClient('Вася')
+    cleanups.push(() => a.client.cancel())
+    await joined(host, a.client, 'allow', '127.0.0.2')
+    expect(a.client.getState().host?.address).toBe('127.0.0.2')
+    // Сеть пропала (Radmin переподключается, ZeroTier выключили): серверы не закрываем, друг остаётся в игре.
+    links = []
+    await host.syncNetworks()
+    expect(servers()).toEqual(['127.0.0.1', '127.0.0.2'])
+    expect(a.client.getState().phase).toBe('streaming')
+  }, 20000)
+
+  it('does not reopen a signaling server while the host is stopping', async () => {
+    let links: VpnLink[] = []
+    const { host } = setup(4, { links: () => links })
+    cleanups.push(() => host.stop())
+    await host.start()
+    const servers = (): number => (host as unknown as { servers: Map<string, unknown> }).servers.size
+    const stopping = host.stop()
+    // Radmin вернул адрес, пока хост останавливается.
+    links = [{ kind: 'radmin', ip: '127.0.0.2', prefix: 8, adapterName: 'Radmin VPN' }]
+    await host.syncNetworks()
+    await stopping
+    expect(servers()).toBe(0)
+    // И снова «Я хост» — без «порт занят».
+    await host.start()
+    expect(host.getState().phase).toBe('running')
+  }, 20000)
+
+  it('shows a host that is in both networks once, via Radmin', async () => {
+    const { client } = (() => {
+      const { makeClient } = setup()
+      return makeClient('Вася', { extra: { linkKind: (a: string) => (a.startsWith('26.') ? 'radmin' : a.startsWith('10.') ? 'zerotier' : undefined) } })
+    })()
+    const up = (h: object): void => (client as unknown as { upsertHost(h: object): void }).upsertHost(h)
+    up({ address: '10.147.17.4', name: 'Хост', slotsUsed: 0, maxSlots: 4, source: 'broadcast', online: true })
+    expect(client.getHosts().map((h) => h.address)).toEqual(['10.147.17.4'])
+    up({ address: '26.1.2.3', name: 'Хост', slotsUsed: 0, maxSlots: 4, source: 'broadcast', online: true })
+    expect(client.getHosts().map((h) => h.address)).toEqual(['26.1.2.3'])
+    // Другой хост в ZeroTier остаётся в списке.
+    up({ address: '10.147.17.9', name: 'Петя', slotsUsed: 0, maxSlots: 4, source: 'broadcast', online: true })
+    expect(client.getHosts().map((h) => h.address).sort()).toEqual(['10.147.17.9', '26.1.2.3'])
+  })
+
   it('sets the per-player cap by the host upload: higher with a proven wide channel, lower for newcomers once it saturates', async () => {
     const { host, makeClient } = setup()
     cleanups.push(() => host.stop())
@@ -940,8 +1021,8 @@ describe('host ↔ client flow', () => {
   const hostSocketOf = (host: HostController, nickname: string): { terminate(): void } =>
     [...(host as unknown as { peers: Map<string, { ws: { terminate(): void }; nickname: string; admitted: boolean }> }).peers.values()].find((p) => p.nickname === nickname && p.admitted)!.ws
 
-  async function joined(host: HostController, client: ClientController, how: 'allow' | 'trust' | 'spectate' = 'allow'): Promise<void> {
-    await client.connect('127.0.0.1')
+  async function joined(host: HostController, client: ClientController, how: 'allow' | 'trust' | 'spectate' = 'allow', address = '127.0.0.1'): Promise<void> {
+    await client.connect(address)
     const req = await waitFor(() => host.getState().requests[0])
     await host.respond(req.id, how)
     await waitFor(() => client.getState().phase === 'streaming')

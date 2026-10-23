@@ -7,14 +7,18 @@ import {
   SIGNALING_PORT,
   type DiscoveryReply
 } from '@shared/protocol'
+import type { VpnLink } from '@shared/types'
 import { run } from '../../elevate'
 import { isProbePacket } from './probe'
-import { isRadminIp, RADMIN_BROADCAST } from './radmin'
+import { broadcastOf, inLink, isRadminIp, linkFor } from './vpn'
 
-/** Можно ли принимать запросы с этого адреса: только сеть Radmin и локальная машина. */
-export function isAllowedPeer(ip: string, extra: string[] = []): boolean {
+/**
+ * Можно ли принимать запросы с этого адреса: сеть Radmin, подсети своих адаптеров ZeroTier и локальная машина.
+ * Обычная локальная сеть (Wi-Fi, провайдер) — нет.
+ */
+export function isAllowedPeer(ip: string, extra: string[] = [], links: VpnLink[] = []): boolean {
   const v4 = ip.replace(/^::ffff:/, '')
-  return isRadminIp(v4) || v4 === '127.0.0.1' || extra.includes(v4)
+  return isRadminIp(v4) || v4 === '127.0.0.1' || extra.includes(v4) || links.some((l) => l.kind === 'zerotier' && inLink(v4, l))
 }
 
 /** Хост: отвечает на UDP-запросы поиска. */
@@ -24,9 +28,11 @@ export class DiscoveryResponder {
   constructor(
     private readonly info: () => Omit<DiscoveryReply, 'magic' | 'port'>,
     private readonly port = DISCOVERY_PORT,
-    private readonly extraAllowed: string[] = [],
+    private readonly extraAllowed: () => string[] = () => [],
     /** Пакеты замера канала (тот же порт: правило файрвола уже есть). */
-    private readonly onProbe?: (msg: Buffer, rinfo: RemoteInfo) => void
+    private readonly onProbe?: (msg: Buffer, rinfo: RemoteInfo) => void,
+    /** Свои сети: из подсетей ZeroTier тоже отвечаем (сеть может появиться, пока хост работает). */
+    private readonly links: () => VpnLink[] = () => []
   ) {}
 
   /** Порт, на котором слушает ответчик (0 в настройке — выбранный системой). */
@@ -51,7 +57,7 @@ export class DiscoveryResponder {
     return new Promise((resolve, reject) => {
       const s = createSocket({ type: 'udp4', reuseAddr: true })
       s.on('message', (msg, rinfo) => {
-        if (!isAllowedPeer(rinfo.address, this.extraAllowed)) return
+        if (!isAllowedPeer(rinfo.address, this.extraAllowed(), this.links())) return
         if (this.onProbe && isProbePacket(msg)) return this.onProbe(msg, rinfo)
         if (msg.length > 64 || msg.toString() !== DISCOVERY_MAGIC) return
         const reply: DiscoveryReply = { magic: DISCOVERY_REPLY, port: SIGNALING_PORT, ...this.info() }
@@ -73,13 +79,20 @@ export class DiscoveryResponder {
   }
 }
 
-/** Соседи из ARP-таблицы в сети Radmin: с кем этот ПК недавно общался через VPN. */
-export async function radminNeighbors(localIp: string): Promise<string[]> {
-  const res = await run('arp', ['-a', '-N', localIp], 5000)
+/** Соседи из ARP-таблицы в сети (Radmin или ZeroTier): с кем этот ПК недавно общался через неё. */
+export async function vpnNeighbors(link: VpnLink): Promise<string[]> {
+  const res = await run('arp', ['-a', '-N', link.ip], 5000)
+  return neighborsFromArp(res.stdout, link)
+}
+
+/** Адреса из вывода `arp -a`, лежащие в сети link (кроме своего и широковещательных). */
+export function neighborsFromArp(stdout: string, link: VpnLink): string[] {
   const found = new Set<string>()
-  for (const m of res.stdout.matchAll(/\b(26\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g)) {
+  const bcast = broadcastOf(link)
+  for (const m of stdout.matchAll(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g)) {
     const ip = m[1]
-    if (ip !== localIp && !ip.endsWith('.255')) found.add(ip)
+    if (ip === link.ip || ip === bcast || ip.endsWith('.255') || !linkFor(ip, [link])) continue
+    found.add(ip)
   }
   return [...found]
 }
@@ -89,66 +102,105 @@ export interface ProbeResult extends DiscoveryReply {
 }
 
 /**
- * Клиент: ищет хосты. Шлёт broadcast на всю сеть Radmin и unicast каждому известному адресу
- * (соседи из ARP, недавние хосты). Ответы собирает в течение windowMs.
+ * Клиент: ищет хосты. В каждой своей сети (Radmin, ZeroTier) шлёт broadcast с её адреса и unicast
+ * каждому известному адресу (соседи из ARP, недавние хосты) — с адреса той сети, в которой он лежит:
+ * с адреса другой сети ответ не дошёл бы. Адреса вне своих сетей (отладка по LAN) — с сокета без привязки.
+ * Ответы собирает в течение windowMs.
  */
 export function probeHosts(opts: {
-  localIp?: string
+  links: VpnLink[]
   targets: string[]
-  broadcast: boolean
   windowMs?: number
   port?: number
   onFound?: (r: ProbeResult) => void
 }): Promise<ProbeResult[]> {
   const port = opts.port ?? DISCOVERY_PORT
+  const payload = Buffer.from(DISCOVERY_MAGIC)
+  const results = new Map<string, ProbeResult>()
+  const groups: { link: VpnLink | null; targets: string[] }[] = opts.links.map((link) => ({ link, targets: [] }))
+  const loose: string[] = []
+  for (const ip of new Set(opts.targets)) {
+    const l = linkFor(ip, opts.links)
+    const g = l && groups.find((x) => x.link === l)
+    if (g) g.targets.push(ip)
+    else loose.push(ip)
+  }
+  if (loose.length || !groups.length) groups.push({ link: null, targets: loose })
+
   return new Promise((resolve) => {
-    const results = new Map<string, ProbeResult>()
-    const s = createSocket('udp4')
     let closed = false
+    const sockets: Socket[] = []
     const timers: NodeJS.Timeout[] = []
+    const senders: ((first: boolean) => void)[] = []
     const finish = (): void => {
       if (closed) return
       closed = true
       timers.forEach(clearTimeout)
-      try {
-        s.close()
-      } catch {
-        /* уже закрыт */
+      for (const s of sockets) {
+        try {
+          s.close()
+        } catch {
+          /* уже закрыт */
+        }
       }
       resolve([...results.values()])
     }
-    s.on('error', finish)
-    s.on('message', (msg, rinfo) => {
-      const r = parseDiscoveryReply(msg)
-      if (!r || results.has(rinfo.address)) return
-      const res = { ...r, address: rinfo.address }
-      results.set(rinfo.address, res)
-      opts.onFound?.(res)
-    })
-    s.bind(0, opts.localIp, () => {
-      const payload = Buffer.from(DISCOVERY_MAGIC)
-      const send = (ip: string): void => {
-        if (closed) return
-        try {
-          s.send(payload, port, ip, () => undefined)
-        } catch {
-          /* сокет закрылся между проверкой и отправкой */
-        }
-      }
-      if (opts.broadcast) {
-        s.setBroadcast(true)
-        send(RADMIN_BROADCAST)
-        send('255.255.255.255')
-      }
-      for (const ip of new Set(opts.targets)) send(ip)
-      // Повтор на случай потери первого пакета.
+    let pending = groups.length
+    const ready = (): void => {
+      if (--pending > 0 || closed) return
+      senders.forEach((f) => f(true))
+      // Повтор на случай потери первого пакета (как до 0.6.2 — без общего broadcast 255.255.255.255).
       timers.push(
-        setTimeout(() => {
-          if (opts.broadcast) send(RADMIN_BROADCAST)
-          for (const ip of new Set(opts.targets)) send(ip)
-        }, 600),
+        setTimeout(() => senders.forEach((f) => f(false)), 600),
         setTimeout(finish, opts.windowMs ?? 2500)
       )
-    })
+    }
+    for (const g of groups) {
+      const s = createSocket('udp4')
+      sockets.push(s)
+      let settled = false
+      const settle = (): void => {
+        if (settled) return
+        settled = true
+        ready()
+      }
+      // Ошибка одного сокета (адрес сети только что пропал) не мешает искать в остальных.
+      s.on('error', settle)
+      s.on('message', (msg, rinfo) => {
+        const r = parseDiscoveryReply(msg)
+        if (!r || results.has(rinfo.address)) return
+        const res = { ...r, address: rinfo.address }
+        results.set(rinfo.address, res)
+        opts.onFound?.(res)
+      })
+      s.bind(0, g.link?.ip, () => {
+        const send = (ip: string): void => {
+          if (closed) return
+          try {
+            s.send(payload, port, ip, () => undefined)
+          } catch {
+            /* сокет закрылся между проверкой и отправкой */
+          }
+        }
+        let broadcast = false
+        if (g.link) {
+          try {
+            s.setBroadcast(true)
+            broadcast = true
+          } catch {
+            /* остаётся unicast */
+          }
+        }
+        const link = g.link
+        senders.push((first) => {
+          if (link && broadcast) {
+            send(broadcastOf(link))
+            if (first) send('255.255.255.255')
+          }
+          g.targets.forEach(send)
+        })
+        settle()
+      })
+    }
   })
 }

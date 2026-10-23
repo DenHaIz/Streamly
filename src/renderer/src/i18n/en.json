@@ -22,14 +22,15 @@
     "connected": "Radmin VPN · {{ip}}",
     "disconnected": "Radmin VPN not connected",
     "missing": "Radmin VPN not found",
-    "helpTitle": "Radmin VPN is required",
-    "helpText": "Streamly connects friends through the free Radmin VPN virtual network. Everyone has to be in the same network.",
+    "helpTitle": "A shared network is required",
+    "helpText": "Streamly connects friends through a free virtual network: Radmin VPN first, ZeroTier as a fallback. Everyone has to be in the same network.",
     "step1": "Install Radmin VPN and start it",
     "step2": "Host: Network → Create Network, pick a name and a password",
     "step3": "Friends: Network → Join Network with the same name and password",
     "download": "Download Radmin VPN",
     "recheck": "Check again",
-    "waiting": "Waiting for the Radmin network…"
+    "waiting": "Waiting for the Radmin or ZeroTier network…",
+    "connectedBoth": "Radmin VPN · {{ip}} + ZeroTier"
   },
   "onboarding": {
     "welcome": "Welcome to Streamly",
@@ -51,7 +52,7 @@
     "open": "Open",
     "connectingTo": "Connecting to {{name}}…",
     "howTitle": "How to start",
-    "how1": "Everyone joins the same Radmin VPN network",
+    "how1": "Everyone joins the same Radmin VPN (or ZeroTier) network",
     "how2": "One person presses \"I'm the host\"",
     "how3": "Everyone else presses \"Connect\""
   },
@@ -170,10 +171,10 @@
   },
   "connect": {
     "title": "Connect",
-    "searching": "Looking for hosts on Radmin…",
+    "searching": "Looking for hosts on Radmin and ZeroTier…",
     "found": "Hosts found",
     "nothing": "No hosts yet",
-    "nothingHint": "Make sure your friend pressed “I'm the host” and you are in the same Radmin network. Or enter their address manually.",
+    "nothingHint": "Make sure your friend pressed “I'm the host” and you are in the same Radmin or ZeroTier network. Or enter their address manually.",
     "refresh": "Refresh",
     "manual": "Host address",
     "manualPlaceholder": "26.0.0.0",
@@ -208,7 +209,7 @@
     "measuring": "Measuring the connection to the host…"
   },
   "errors": {
-    "no_radmin": "Not connected to Radmin VPN",
+    "no_radmin": "Not connected to Radmin VPN or ZeroTier",
     "apollo_install_failed": "Could not install the streaming server",
     "apollo_unreachable": "The streaming server is not responding",
     "apollo_auth": "Could not sign in to Apollo",
@@ -451,14 +452,14 @@
     }
   },
   "errorHints": {
-    "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
+    "no_radmin": "Start Radmin VPN (or ZeroTier) and join the shared network with your friends. The indicator at the top should turn green.",
     "apollo_install_failed": "The Apollo installer failed. Check that your antivirus is not blocking it and press Retry.",
     "apollo_unreachable": "The Apollo service is not responding. Open Windows Services and check that \"Apollo Service\" is running, or restart the PC.",
     "apollo_auth": "Enter the login and password of the Apollo web panel (https://localhost:47990).",
     "install_cancelled": "Press Retry and choose Yes in the Windows prompt.",
     "port_busy": "Port 47900 is busy: another copy of Streamly is open, or Windows reserved this port (Hyper-V/WSL). Close the extra copy; if that does not help, restart the PC.",
     "sunshine_conflict": "Sunshine is running and uses the same ports as Apollo. Stop \"Sunshine Service\" in Windows Services (or uninstall Sunshine) and press Retry.",
-    "host_unreachable": "Make sure you and the host are in the same Radmin network and the host has a green dot in Radmin. If the connection goes through a relay, restart Radmin on both PCs.",
+    "host_unreachable": "Make sure you and the host are in the same Radmin network and the host has a green dot in Radmin. If the connection goes through a relay, restart Radmin on both PCs — or try ZeroTier.",
     "host_not_hosting": "The host PC is reachable, but Streamly is not in host mode there. Ask your friend to open Streamly and press \"I'm the host\".",
     "host_full": "All slots are taken. Wait for someone to leave or ask the host to raise the limit in settings.",
     "denied": "The host pressed Decline. You can ask again in 30 seconds.",
@@ -470,7 +471,7 @@
     "stream_timeout": "The Moonlight window opened but no video arrived. Usually UDP ports 47998–48000 are closed on the host, or the packet is too large for the VPN. Try packet size 1024 in settings.",
     "moonlight_missing": "Reinstall Streamly: Moonlight files are damaged or were removed by an antivirus.",
     "version_mismatch": "Install the same Streamly version as the host.",
-    "connection_lost": "The connection to the host dropped. Check Radmin VPN and connect again.",
+    "connection_lost": "The connection to the host dropped. Check Radmin VPN (or ZeroTier) and connect again.",
     "unknown": "Copy the report and send it to whoever set up Streamly.",
     "host_busy": "The streaming server on the host PC is restarting or busy. Wait a minute and connect again."
   },
@@ -485,7 +486,7 @@
     "again": "Check again",
     "checks": {
       "radmin": "Radmin VPN on this PC",
-      "radminAddress": "Radmin network address",
+      "radminAddress": "Radmin or ZeroTier network address",
       "moonlight": "Moonlight client",
       "ping": "Ping reply",
       "streamly": "Streamly on the host (port 47900)",
@@ -501,17 +502,18 @@
       "audio": "Audio stays on the host",
       "chatRouting": "Discord out of the stream",
       "encoder": "Video encoder",
-      "apolloVersion": "Apollo version"
+      "apolloVersion": "Apollo version",
+      "zerotier": "ZeroTier on this PC"
     },
     "hints": {
       "radmin": "Start Radmin VPN and join the shared network.",
-      "notRadminAddress": "This is not a Radmin address (26.x.x.x). It only works inside one local network.",
+      "notRadminAddress": "This is neither a Radmin address (26.x.x.x) nor one from your ZeroTier network. It only works inside one local network.",
       "moonlight": "Reinstall Streamly: Moonlight is missing.",
       "pingBlocked": "Ping does not get through. That is normal: Windows often blocks it in the firewall. See the next items.",
       "highLatency": "High latency: Radmin probably routes you through a relay. Restart Radmin on both PCs or pick Economy in settings.",
       "notHosting": "The host PC responds, but Streamly is not in host mode. Ask your friend to press \"I'm the host\".",
       "streamlyFirewall": "The host PC responds, but the Streamly port is closed. The host needs to allow Streamly in the firewall or antivirus (or press \"I'm the host\" again — Streamly adds the rule).",
-      "noRoute": "The host PC does not respond at all. Check that it is on, you share a Radmin network and it has a green dot in Radmin.",
+      "noRoute": "The host PC does not respond at all. Check that it is on and you share a network (Radmin: green dot next to it; ZeroTier: both ticked Auth).",
       "apolloNotRunning": "The streaming server is not running on the host. Host: Services → \"Apollo Service\" → start, or restart the PC.",
       "apolloFirewall": "The streaming server ports are closed. The host needs to allow Apollo in the firewall or antivirus.",
       "apolloInstall": "Press \"I'm the host\" — Streamly will install Apollo.",
@@ -530,12 +532,15 @@
       "chatStarting": "The sound module did not respond. Restart \"I'm the host\"; if that doesn't help, save the log archive and send it.",
       "softwareEncoder": "Video is encoded on the CPU: update the graphics driver and restart \"I'm the host\".",
       "wrongGpu": "The wrong GPU encodes: plug the monitor into the graphics card, not the motherboard.",
-      "apolloOutdated": "An older Apollo is installed: Streamly ships a newer one. Stop hosting, uninstall Apollo in \"Apps & features\" and press \"I'm the host\" again — Streamly will install the new version (Streamly settings are kept)."
+      "apolloOutdated": "An older Apollo is installed: Streamly ships a newer one. Stop hosting, uninstall Apollo in \"Apps & features\" and press \"I'm the host\" again — Streamly will install the new version (Streamly settings are kept).",
+      "zerotier": "Start ZeroTier and join the host network.",
+      "radminOrZt": "This is the host's Radmin address, but only ZeroTier is connected here. Ask the host for the ZeroTier address (shown in the host window) or start Radmin VPN.",
+      "notInZtNetwork": "The address is neither from Radmin nor from your ZeroTier network. Check that you share the ZeroTier network with the host and the host ticked Auth for you."
     },
     "summary": {
       "allGood": "Connection is fine — you can connect",
-      "noRadmin": "Connect to Radmin VPN first",
-      "noRoute": "No connection to the host PC over Radmin",
+      "noRadmin": "Connect to Radmin VPN or ZeroTier first",
+      "noRoute": "No connection to the host PC over Radmin or ZeroTier",
       "notHosting": "The host has not pressed \"I'm the host\" yet",
       "streamlyBlocked": "The host firewall blocks Streamly",
       "apolloBlocked": "The host firewall blocks the streaming server",
@@ -787,5 +792,12 @@
       "righty": "Right stick ↕",
       "guide": "Home"
     }
+  },
+  "zerotier": {
+    "connected": "ZeroTier · {{ip}}",
+    "disconnected": "ZeroTier not connected",
+    "title": "Or ZeroTier — when Radmin cannot connect",
+    "text": "The host creates a network at my.zerotier.com (free for up to 10 devices) and gives friends its ID. Friends: ZeroTier tray icon → “Join New Network…” → ID. The host ticks Auth for them in the member list. Streamly finds the network by itself.",
+    "download": "Download ZeroTier"
   }
 }

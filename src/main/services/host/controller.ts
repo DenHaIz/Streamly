@@ -27,7 +27,8 @@ import type {
   PlayerStatus,
   PlayerView,
   StreamPolicy,
-  TrustedFriendView
+  TrustedFriendView,
+  VpnLink
 } from '@shared/types'
 import type { JoinDecision } from '@shared/ipc'
 import type { ApolloApi, ApolloClient } from '../apollo/api'
@@ -79,8 +80,10 @@ export interface HostDeps {
   secrets: SecretsService
   apollo: ApolloLike
   installer: InstallerLike
-  /** IP хоста в сети Radmin (или адрес для отладки). */
+  /** Основной IP хоста: в сети Radmin, иначе ZeroTier (или адрес для отладки). */
   address: () => string | undefined
+  /** Все адреса хоста в сетях для игры (Radmin и ZeroTier): слушаем на каждом, друзей принимаем из их подсетей. */
+  links?: () => VpnLink[]
   appVersion: string
   signalingPort?: number
   discoveryPort?: number
@@ -257,7 +260,8 @@ export class HostController extends EventEmitter {
   private phase: HostState['phase'] = 'idle'
   private error?: ErrorCode
   private errorDetail?: string
-  private wss: WebSocketServer | null = null
+  /** Сервер сигнализации на каждом адресе хоста (Radmin, ZeroTier). */
+  private readonly servers = new Map<string, WebSocketServer>()
   private discovery: DiscoveryResponder | null = null
   private readonly peers = new Map<string, Peer>()
   private pollTimer: NodeJS.Timeout | null = null
@@ -310,7 +314,7 @@ export class HostController extends EventEmitter {
   private invite: { code: string; expiresAt: number } | null = null
   /** Хост временно забрал ввод у всех. */
   private inputPaused = false
-  private upload: { bytes: number; at: number; mbps?: number } | null = null
+  private upload: { bytes: number; at: number; mbps?: number; key?: string } | null = null
   /** Игроки, ждущие возвращения после обрыва (по deviceId). */
   private readonly graces = new Map<string, Grace>()
   /** Чей геймпад в каком слоте XInput: deviceId, 'host' (свой геймпад хоста) или '?' (неизвестно). */
@@ -396,6 +400,7 @@ export class HostController extends EventEmitter {
       error: this.error,
       errorDetail: this.errorDetail,
       address: this.d.address(),
+      addresses: this.addresses().map((ip) => ({ ip, kind: this.links().find((l) => l.ip === ip)?.kind ?? 'radmin' })),
       hostName: this.d.settings.get().nickname,
       maxPlayers: this.d.settings.get().host.maxPlayers,
       players,
@@ -823,15 +828,61 @@ export class HostController extends EventEmitter {
     }
   }
 
-  private async listen(gen: number): Promise<void> {
+  /** Сети хоста: Radmin и ZeroTier (без них — только основной адрес, как при отладке по LAN). */
+  private links(): VpnLink[] {
+    return this.d.links?.() ?? []
+  }
+
+  /** Адреса, на которых слушаем: основной первым, затем остальные сети. */
+  private addresses(): string[] {
+    const main = this.d.address()
+    return [...new Set([...(main ? [main] : []), ...this.links().map((l) => l.ip)])]
+  }
+
+  /** Сервер сигнализации на одном адресе. */
+  private openServer(host: string): Promise<WebSocketServer> {
     const port = this.d.signalingPort ?? SIGNALING_PORT
-    // Слушаем только адрес в сети Radmin, а не все интерфейсы ПК.
-    const host = this.d.address()
-    const wss = await new Promise<WebSocketServer>((resolve, reject) => {
+    return new Promise<WebSocketServer>((resolve, reject) => {
       const s = new WebSocketServer({ host, port, maxPayload: 8 * 1024 })
       s.once('listening', () => resolve(s))
       s.once('error', reject)
-    }).catch((e: NodeJS.ErrnoException) => {
+    }).then((wss) => {
+      wss.on('error', (e) => this.log(`signaling server error (${host})`, e))
+      wss.on('connection', (ws, req) => this.onConnection(ws, req.socket.remoteAddress ?? ''))
+      return wss
+    })
+  }
+
+  /**
+   * Сети поменялись, пока хост работает (запустили ZeroTier, Radmin получил адрес): слушаем и на новых адресах.
+   * Серверы на пропавших адресах не закрываем, как и до ZeroTier: Radmin при переподключении теряет адрес
+   * на секунды, а друзья на нём продолжают игру и возвращаются, когда адрес вернётся. Закрываются при остановке.
+   */
+  async syncNetworks(): Promise<void> {
+    // Во время остановки фаза ещё «running», а серверы уже закрыты: новый остался бы слушать после «Остановить».
+    if (this.phase !== 'running' || this.stopping) return
+    const gen = this.gen
+    for (const ip of this.addresses()) {
+      if (this.servers.has(ip)) continue
+      try {
+        const wss = await this.openServer(ip)
+        if (gen !== this.gen || this.stopping || this.phase !== 'running' || this.servers.has(ip)) {
+          wss.close()
+          continue
+        }
+        this.servers.set(ip, wss)
+        this.log(`signaling: listening on ${ip}`)
+      } catch (e) {
+        this.log(`signaling on ${ip} failed`, e instanceof Error ? e.message : e)
+      }
+    }
+    this.emitState()
+  }
+
+  private async listen(gen: number): Promise<void> {
+    // Слушаем только адреса в сетях Radmin и ZeroTier, а не все интерфейсы ПК.
+    const [main, ...rest] = this.addresses()
+    const wss = await this.openServer(main).catch((e: NodeJS.ErrnoException) => {
       // EACCES: порт попал в диапазон, зарезервированный Windows (Hyper-V/WSL), — для пользователя это тоже «порт занят».
       if (gen === this.gen) this.setPhase('error', e.code === 'EADDRINUSE' || e.code === 'EACCES' ? 'port_busy' : 'unknown', `${e.code ?? ''} ${e.message}`.trim())
       throw e
@@ -841,16 +892,29 @@ export class HostController extends EventEmitter {
       wss.close()
       throw new Cancelled()
     }
-    this.wss = wss
-    wss.on('error', (e) => this.log('signaling server error', e))
-    wss.on('connection', (ws, req) => this.onConnection(ws, req.socket.remoteAddress ?? ''))
+    this.servers.set(main, wss)
+    // Вторая сеть (ZeroTier рядом с Radmin) не обязательна: без неё хост работает через основную.
+    for (const ip of rest) {
+      const extra = await this.openServer(ip).catch((e: unknown) => {
+        this.log(`signaling on ${ip} failed`, e instanceof Error ? e.message : e)
+        return null
+      })
+      if (!extra) continue
+      if (gen !== this.gen) {
+        extra.close()
+        throw new Cancelled()
+      }
+      this.servers.set(ip, extra)
+    }
+    this.log(`signaling: listening on ${[...this.servers.keys()].join(', ')}`)
 
     const probe = new ProbeHost((buf, port, addr) => discovery.send(buf, port, addr))
     const discovery = new DiscoveryResponder(
       () => ({ hostName: this.d.settings.get().nickname, slotsUsed: this.admittedCount, maxSlots: this.d.settings.get().host.maxPlayers }),
       this.d.discoveryPort,
-      this.allowedExtra(),
-      (msg, rinfo) => probe.onPacket(msg, rinfo)
+      () => this.allowedExtra(),
+      (msg, rinfo) => probe.onPacket(msg, rinfo),
+      () => this.links()
     )
     try {
       await discovery.start()
@@ -892,10 +956,9 @@ export class HostController extends EventEmitter {
     }, this.d.pollMs ?? 2000)
   }
 
-  /** Адреса, с которых принимаем соединения сверх сети Radmin: свой адрес (проверка на одном ПК) и отладочные. */
+  /** Адреса, с которых принимаем соединения сверх сетей Radmin и ZeroTier: свои адреса (проверка на одном ПК) и отладочные. */
   private allowedExtra(): string[] {
-    const own = this.d.address()
-    return [...(this.d.extraAllowed ?? []), ...(own ? [own] : [])]
+    return [...(this.d.extraAllowed ?? []), ...this.addresses()]
   }
 
   private stopping: Promise<void> | null = null
@@ -917,7 +980,9 @@ export class HostController extends EventEmitter {
       p.ws.close()
     }
     // Друг с упавшим ПК или Radmin не ответит на закрытие, и ws ждал бы его 30 с: через секунду обрываем.
-    const sockets = [...(this.wss?.clients ?? [])]
+    const servers = [...this.servers.values()]
+    this.servers.clear()
+    const sockets = servers.flatMap((s) => [...s.clients])
     const cut = setTimeout(() => sockets.forEach((s) => s.terminate()), 1000)
     this.peers.clear()
     for (const id of [...this.graces.keys()]) this.endGrace(id)
@@ -927,11 +992,9 @@ export class HostController extends EventEmitter {
     this.discovery = null
     this.probe?.clear()
     this.probe = null
-    const wss = this.wss
-    await Promise.race([new Promise<void>((r) => (wss ? wss.close(() => r()) : r())), sleep(3000)])
+    await Promise.race([Promise.all(servers.map((wss) => new Promise<void>((r) => wss.close(() => r())))), sleep(3000)])
     clearTimeout(cut)
     sockets.forEach((s) => s.terminate())
-    this.wss = null
     // Дожидаемся опроса, который мог уже начаться, иначе он вернул бы права после блокировки.
     await this.polling
     if (wasActive) {
@@ -1084,16 +1147,20 @@ export class HostController extends EventEmitter {
     if (ok && gen === this.gen) await this.d.apollo.login().catch(() => undefined)
   }
 
-  /** Исходящий поток хоста по счётчику адаптера Radmin. true — значение заметно изменилось. */
+  /** Исходящий поток хоста по счётчикам адаптеров сетей для игры (Radmin и ZeroTier). true — значение заметно изменилось. */
   private async measureUpload(): Promise<boolean> {
-    const address = this.d.address()
-    if (!this.d.sentBytes || !address) return false
-    const bytes = await this.d.sentBytes(address).catch(() => undefined)
-    if (bytes === undefined) return false
+    const list = this.addresses()
+    const sentBytes = this.d.sentBytes
+    if (!sentBytes || !list.length) return false
+    const parts = await Promise.all(list.map((a) => sentBytes(a).catch(() => undefined)))
+    if (parts.every((b) => b === undefined)) return false
+    const bytes = parts.reduce<number>((sum, b) => sum + (b ?? 0), 0)
+    const key = list.filter((_, i) => parts[i] !== undefined).join(',')
     const now = Date.now()
     const prev = this.upload
-    this.upload = { bytes, at: now, mbps: prev?.mbps }
-    if (!prev || now <= prev.at || bytes < prev.bytes) return false
+    this.upload = { bytes, at: now, mbps: prev?.mbps, key }
+    // Набор адаптеров поменялся (ZeroTier включили или выключили) — сумма несравнима с прошлой.
+    if (!prev || now <= prev.at || bytes < prev.bytes || prev.key !== key) return false
     const mbps = Math.round(((bytes - prev.bytes) * 8) / ((now - prev.at) / 1000) / 1e5) / 10
     this.upload.mbps = mbps
     return prev.mbps === undefined || Math.abs(mbps - prev.mbps) >= 0.5
@@ -1132,7 +1199,7 @@ export class HostController extends EventEmitter {
 
   private onConnection(ws: WebSocket, remote: string): void {
     const address = remote.replace(/^::ffff:/, '')
-    if (!isAllowedPeer(address, this.allowedExtra())) {
+    if (!isAllowedPeer(address, this.allowedExtra(), this.links())) {
       ws.close(1008, 'forbidden')
       return
     }
@@ -1996,7 +2063,7 @@ export class HostController extends EventEmitter {
     if (!this.invite || this.invite.expiresAt < Date.now()) {
       this.invite = { code: randomBytes(12).toString('base64url'), expiresAt: Date.now() + (this.d.inviteTtlMs ?? 12 * 3600_000) }
     }
-    return { link: makeInviteLink(address, this.d.settings.get().nickname, this.invite.code), expiresAt: this.invite.expiresAt }
+    return { link: makeInviteLink(address, this.d.settings.get().nickname, this.invite.code, this.addresses()), expiresAt: this.invite.expiresAt }
   }
 
   private validInvite(code: string | undefined): boolean {
@@ -2034,7 +2101,7 @@ export class HostController extends EventEmitter {
       items.push({ id, status, hint: status === 'ok' ? undefined : hint, value })
     }
     const address = this.d.address()
-    add('radmin', address ? 'ok' : 'fail', 'radmin', address)
+    add('radmin', address ? 'ok' : 'fail', 'radmin', this.addresses().join(', ') || undefined)
     let st: ApolloInstallStatus | undefined
     try {
       st = await this.d.installer.status()

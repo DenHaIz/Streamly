@@ -4,8 +4,9 @@ import { describe, expect, it } from 'vitest'
 import { fromApolloPerm, PERM, PERM_BASE, toApolloPerm } from '@shared/perms'
 import { parseClientMessage, parseDiscoveryReply, parseHostMessage, sanitizeNickname } from '@shared/protocol'
 import { DEFAULT_SETTINGS, type Settings } from '@shared/types'
-import { detectRadmin, isRadminIp } from '../src/main/services/net/radmin'
-import { isAllowedPeer } from '../src/main/services/net/discovery'
+import { broadcastOf, detectNetworks, isRadminIp, linkFor } from '../src/main/services/net/vpn'
+import { isAllowedPeer, neighborsFromArp } from '../src/main/services/net/discovery'
+import { makeInviteLink, parseInviteLink } from '@shared/protocol'
 import { normalizeSettings } from '../src/main/settings'
 import { deepMerge } from '../src/main/store'
 import { buildStreamArgs } from '../src/main/services/moonlight/runner'
@@ -64,30 +65,78 @@ describe('protocol', () => {
   })
 })
 
-describe('radmin', () => {
+describe('radmin and zerotier', () => {
+  const base = { netmask: '255.0.0.0', mac: '00:00:00:00:00:00', internal: false, cidr: null }
+  const off = { installed: false, connected: false }
+  const zt = { ...base, netmask: '255.255.255.0', address: '10.147.17.4', family: 'IPv4' as const }
+
   it('detects Radmin adapter by 26.x address or name', () => {
     expect(isRadminIp('26.1.2.3')).toBe(true)
     expect(isRadminIp('192.168.0.26')).toBe(false)
-    const base = { netmask: '255.0.0.0', mac: '00:00:00:00:00:00', internal: false, cidr: null }
-    expect(
-      detectRadmin({
-        Ethernet: [{ ...base, address: '192.168.1.5', family: 'IPv4' }],
-        'Radmin VPN': [{ ...base, address: '26.44.1.9', family: 'IPv4' }]
-      })
-    ).toEqual({ installed: true, connected: true, ip: '26.44.1.9', adapterName: 'Radmin VPN' })
-    expect(detectRadmin({ 'Radmin VPN': [{ ...base, address: 'fe80::1', family: 'IPv6', scopeid: 1 }] })).toEqual({
+    const n = detectNetworks({
+      Ethernet: [{ ...base, address: '192.168.1.5', family: 'IPv4' }],
+      'Radmin VPN': [{ ...base, address: '26.44.1.9', family: 'IPv4' }]
+    })
+    expect(n.radmin).toEqual({ installed: true, connected: true, ip: '26.44.1.9', adapterName: 'Radmin VPN' })
+    expect(n.zerotier).toEqual(off)
+    expect(n.links).toEqual([{ kind: 'radmin', ip: '26.44.1.9', prefix: 8, adapterName: 'Radmin VPN' }])
+    expect(detectNetworks({ 'Radmin VPN': [{ ...base, address: 'fe80::1', family: 'IPv6', scopeid: 1 }] }).radmin).toEqual({
       installed: true,
       connected: false,
       adapterName: 'Radmin VPN'
     })
-    expect(detectRadmin({ Ethernet: [{ ...base, address: '10.0.0.2', family: 'IPv4' }] })).toEqual({ installed: false, connected: false })
+    const none = detectNetworks({ Ethernet: [{ ...base, address: '10.0.0.2', family: 'IPv4' }] })
+    expect(none).toEqual({ radmin: off, zerotier: off, links: [] })
   })
 
-  it('only allows Radmin and loopback peers', () => {
+  it('detects ZeroTier by adapter name (or the name the helper found by driver), Radmin stays first', () => {
+    const n = detectNetworks({
+      'ZeroTier One [8056c2e21c000001]': [zt],
+      'Radmin VPN': [{ ...base, address: '26.44.1.9', family: 'IPv4' }]
+    })
+    expect(n.links.map((l) => l.kind)).toEqual(['radmin', 'zerotier'])
+    expect(n.zerotier).toEqual({ installed: true, connected: true, ip: '10.147.17.4', adapterName: 'ZeroTier One [8056c2e21c000001]' })
+    expect(n.links[1].prefix).toBe(24)
+    // Переименованное подключение — по подсказке помощника.
+    expect(detectNetworks({ 'Игры': [zt] }).links).toEqual([])
+    expect(detectNetworks({ 'Игры': [zt] }, new Set(['Игры'])).zerotier.ip).toBe('10.147.17.4')
+    // Сеть ещё не выдала адрес (169.254.x): установлен, но не подключён.
+    expect(detectNetworks({ 'ZeroTier One [x]': [{ ...zt, address: '169.254.3.4', netmask: '255.255.0.0' }] }).zerotier).toEqual({
+      installed: true,
+      connected: false,
+      adapterName: 'ZeroTier One [x]'
+    })
+  })
+
+  it('maps addresses to networks, broadcast and ARP neighbours', () => {
+    const links = detectNetworks({ 'ZeroTier One [a]': [zt], 'Radmin VPN': [{ ...base, address: '26.44.1.9', family: 'IPv4' }] }).links
+    expect(linkFor('26.1.1.1', links)?.kind).toBe('radmin')
+    expect(linkFor('::ffff:10.147.17.200', links)?.kind).toBe('zerotier')
+    expect(linkFor('10.147.18.2', links)).toBeUndefined()
+    expect(linkFor('192.168.1.10', links)).toBeUndefined()
+    expect(broadcastOf(links[0])).toBe('26.255.255.255')
+    expect(broadcastOf(links[1])).toBe('10.147.17.255')
+    const arp = 'Interface: 10.147.17.4 --- 0x1a\n  10.147.17.9   aa-bb  dynamic\n  10.147.17.255  ff-ff  static\n  224.0.0.22  01-00  static\n  192.168.1.1 aa  dynamic'
+    expect(neighborsFromArp(arp, links[1])).toEqual(['10.147.17.9'])
+  })
+
+  it('allows Radmin, own ZeroTier subnets and loopback peers only', () => {
     expect(isAllowedPeer('::ffff:26.5.5.5')).toBe(true)
     expect(isAllowedPeer('127.0.0.1')).toBe(true)
     expect(isAllowedPeer('192.168.1.10')).toBe(false)
     expect(isAllowedPeer('192.168.1.10', ['192.168.1.10'])).toBe(true)
+    const links = detectNetworks({ 'ZeroTier One [a]': [zt] }).links
+    expect(isAllowedPeer('10.147.17.9', [], links)).toBe(true)
+    expect(isAllowedPeer('10.147.18.9', [], links)).toBe(false)
+    // Без своего ZeroTier частные адреса не пускаем.
+    expect(isAllowedPeer('10.147.17.9')).toBe(false)
+  })
+
+  it('invite carries the ZeroTier address next to Radmin; old links still parse', () => {
+    const link = makeInviteLink('26.1.2.3', 'Дима', 'abcDEF123_-xyz', ['26.1.2.3', '10.147.17.4'])
+    expect(parseInviteLink(link)).toEqual({ address: '26.1.2.3', name: 'Дима', code: 'abcDEF123_-xyz', alt: ['10.147.17.4'] })
+    expect(makeInviteLink('26.1.2.3', 'Дима', 'abcDEF123_-xyz', ['26.1.2.3'])).not.toContain('alt=')
+    expect(parseInviteLink('streamly://join/26.1.2.3?name=x&alt=999.1.1.1,10.0.0.1,26.1.2.3')?.alt).toEqual(['10.0.0.1'])
   })
 })
 

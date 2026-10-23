@@ -4,7 +4,8 @@
 //  - маршрутизация звука хоста: Discord мимо трансляции (как «Echo Cancelling» в Parsec);
 //  - горячие клавиши Streamly (перехват клавиатуры, который работает и когда Moonlight захватил клавиши);
 //  - окна Streamly поверх игры;
-//  - геймпады так, как их видит Moonlight (SDL3), и сырые кнопки для мастера раскладки.
+//  - геймпады так, как их видит Moonlight (SDL3), и сырые кнопки для мастера раскладки;
+//  - какие кодеки видеокарта декодирует аппаратно (выбор H.264, HEVC или AV1).
 //
 // Собирается компилятором C# из .NET Framework 4 (есть в каждой Windows 10/11): scripts/build-helper.mjs.
 // Протокол: по строке JSON на команду в stdin, по строке JSON на ответ или событие в stdout.
@@ -168,6 +169,8 @@ namespace Streamly
                     return SdlPads.State(Str(c, "sdl"), Str(c, "db"), Str(c, "guid"));
                 case "padClose":
                     return SdlPads.Close();
+                case "decoders":
+                    return VideoDecoders.Query();
                 case "router":
                     router.Configure(Bool(c, "enabled"), Bool(c, "monitor"), Bool(c, "excludeChat"), Strings(c, "chatApps"), Strings(c, "virtualNames"));
                     return router.Snapshot();
@@ -1674,6 +1677,64 @@ namespace Streamly
                 openGuid = null;
                 return true;
             });
+        }
+    }
+
+    /// <summary>
+    /// Какие кодеки видеокарта декодирует аппаратно (D3D11 Video, как у Moonlight): по профилям декодера
+    /// адаптера по умолчанию. Без видеокарты (Microsoft Basic Render Driver) список пустой.
+    /// </summary>
+    static class VideoDecoders
+    {
+        [DllImport("d3d11.dll")]
+        static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, IntPtr levels, uint numLevels, uint sdk, out IntPtr device, out int level, out IntPtr context);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        delegate uint ProfileCountFn(IntPtr self);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        delegate int ProfileFn(IntPtr self, uint index, out Guid profile);
+
+        static readonly Guid IID_ID3D11VideoDevice = new Guid("10EC4D5B-975A-4689-B9E4-D0AAC30FE333");
+        static readonly Guid H264 = new Guid("1b81be68-a0c7-11d3-b984-00c04f2e73c5");
+        static readonly Guid HEVC = new Guid("5b11d51b-2f4c-4452-bcc3-09f2a1160cc0");
+        static readonly Guid HEVC10 = new Guid("107af0e0-ef1a-4d19-aba8-67a163073d13");
+        static readonly Guid AV1 = new Guid("b8be4ccb-cf53-46ba-8d59-d6b8a6da5d2a");
+
+        public static object Query()
+        {
+            var r = new Dictionary<string, object>();
+            r["h264"] = false;
+            r["hevc"] = false;
+            r["av1"] = false;
+            IntPtr device, context, video = IntPtr.Zero;
+            int level;
+            // D3D_DRIVER_TYPE_HARDWARE, D3D11_SDK_VERSION = 7.
+            if (D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0, IntPtr.Zero, 0, 7, out device, out level, out context) < 0) return r;
+            try
+            {
+                Guid iid = IID_ID3D11VideoDevice;
+                if (Marshal.QueryInterface(device, ref iid, out video) < 0 || video == IntPtr.Zero) return r;
+                // ID3D11VideoDevice: IUnknown (3 метода), 8 методов Create*, затем GetVideoDecoderProfileCount (11) и GetVideoDecoderProfile (12).
+                IntPtr vtbl = Marshal.ReadIntPtr(video);
+                var count = (ProfileCountFn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vtbl, 11 * IntPtr.Size), typeof(ProfileCountFn));
+                var get = (ProfileFn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vtbl, 12 * IntPtr.Size), typeof(ProfileFn));
+                uint n = count(video);
+                for (uint i = 0; i < n && i < 256; i++)
+                {
+                    Guid g;
+                    if (get(video, i, out g) < 0) continue;
+                    if (g == H264) r["h264"] = true;
+                    else if (g == HEVC || g == HEVC10) r["hevc"] = true;
+                    else if (g == AV1) r["av1"] = true;
+                }
+                return r;
+            }
+            finally
+            {
+                if (video != IntPtr.Zero) Marshal.Release(video);
+                if (context != IntPtr.Zero) Marshal.Release(context);
+                if (device != IntPtr.Zero) Marshal.Release(device);
+            }
         }
     }
 

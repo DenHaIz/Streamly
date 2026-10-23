@@ -346,7 +346,7 @@
     "chatRoutingHint": "When players ask, Discord is left out of the stream audio. Requires Steam Streaming Speakers (present when Steam is installed). You hear the game with about 30 ms delay.",
     "hz": "{{value}} Hz",
     "autoQuality": "Auto quality",
-    "autoQualityHint": "Before streaming Streamly measures the connection to the host and picks bitrate and resolution, and lowers quality if the connection stays poor",
+    "autoQualityHint": "Before streaming, Streamly measures the channel to the host the way video travels (over UDP), watches it for congestion during the game and remembers what the connection to each host can handle",
     "presetsByAuto": "Quality is chosen automatically",
     "hdr": "HDR",
     "hdrHint": "Turn on HDR in Windows display settings on both PCs. Without support Moonlight streams as usual",
@@ -437,7 +437,18 @@
     "requestSound": "Sound on requests",
     "requestSoundHint": "A short chime when someone wants to join or asks for control; the tray icon blinks",
     "gameNotify": "Requests over the game",
-    "gameNotifyHint": "A card in the screen corner while you play: answer with the mouse or hotkeys, the game is not minimised"
+    "gameNotifyHint": "A card in the screen corner while you play: answer with the mouse or hotkeys, the game is not minimised",
+    "priority": "Latency or quality",
+    "priorities": {
+      "latency": "Latency",
+      "balanced": "Balanced",
+      "quality": "Quality"
+    },
+    "priorityHint": {
+      "latency": "Video gets 70% of the measured channel: headroom against network queues — lower latency, slightly softer picture",
+      "balanced": "80% of the channel, frames shown right away — suits most people",
+      "quality": "90% of the channel, frame pacing and AV1 if both graphics cards support it; slightly higher latency"
+    }
   },
   "errorHints": {
     "no_radmin": "Start Radmin VPN and join the shared network with your friends. The indicator at the top should turn green.",
@@ -585,7 +596,9 @@
     "identifyHint": "Not sure about your number — press \"Which is mine?\" and then any button on your gamepad.",
     "identifyWaiting": "Press any button on your gamepad…",
     "identifyDone": "Done — the number is updated.",
-    "identifyNotFound": "No button press (or the host runs an older Streamly)."
+    "identifyNotFound": "No button press (or the host runs an older Streamly).",
+    "congestedAuto": "The channel to the host is congested and latency is growing. Streamly is lowering the quality before the game starts stuttering.",
+    "congested": "The channel to the host is congested and latency is growing. Lower the quality or turn on auto quality."
   },
   "overlay": {
     "title": "Stream menu",
@@ -616,7 +629,11 @@
     "moonlightHint": "Moonlight's statistics over the game (Ctrl+Alt+Shift+S). Press again to hide.",
     "relayTip": "Radmin seems to route you through its relay: higher latency, lower speed. Open Radmin VPN and check the connection type to the host; restarting Radmin on both PCs often helps.",
     "wifiTip": "You're on Wi-Fi: a cable usually removes stutters and latency spikes.",
-    "softwareTip": "The host encodes on the CPU — several players will stutter."
+    "softwareTip": "The host encodes on the CPU — several players will stutter.",
+    "atLeast": "{{value}} Mbit/s or more",
+    "queue": "Network queue",
+    "congested": "channel congested",
+    "codec": "Codec"
   },
   "update": {
     "title": "Updates",

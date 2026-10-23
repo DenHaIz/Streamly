@@ -19,7 +19,7 @@ import {
 } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { existsSync, readFileSync } from 'node:fs'
-import { cpus, totalmem } from 'node:os'
+import { constants as osConstants, cpus, setPriority, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { EVENT_CHANNEL, IPC, type BridgeEvent, type BridgeEvents, type JoinDecision, type NavTarget } from '@shared/ipc'
 import { inviteMessage } from '@shared/invite'
@@ -355,6 +355,12 @@ void app.whenReady().then(() => {
     moonlightLog: (since) => moonlight.logTail(since),
     wifi: async () => (helper.available ? !!internetAdapter(await helper.netInfo())?.wifi : false),
     isHung: async (pid) => (helper.available ? helper.hung(pid) : false),
+    decoders: async () => {
+      if (!helper.available) return undefined
+      const caps = await helper.decoders()
+      log(`hardware decoders: ${Object.entries(caps).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none found'}`)
+      return caps
+    },
     log
   })
 
@@ -378,11 +384,23 @@ void app.whenReady().then(() => {
   updates.on('state', (s) => broadcast('update', s))
 
   let lastHost = ''
+  let hostPriorityHigh = false
   host.on('state', (s: HostState) => {
     broadcast('hostState', s)
     const sig = `${s.phase} ${s.error ?? ''} players=${s.players.map((p) => `${p.nickname}:${p.status}`).join(',')} requests=${s.requests.length}`
     if (sig !== lastHost) log(`[host] ${sig}${s.errorDetail ? ` (${s.errorDetail})` : ''}`)
     lastHost = sig
+    // Пока идёт хостинг, Streamly отвечает на UDP-пинги игроков (слежение за перегрузкой канала): под нагрузкой
+    // от игры обычный приоритет добавлял бы к ответам свою задержку, и игроки видели бы «забитый» канал.
+    const wantHigh = s.phase === 'running'
+    if (wantHigh !== hostPriorityHigh) {
+      hostPriorityHigh = wantHigh
+      try {
+        setPriority(wantHigh ? osConstants.priority.PRIORITY_ABOVE_NORMAL : osConstants.priority.PRIORITY_NORMAL)
+      } catch (e) {
+        log('process priority', e)
+      }
+    }
   })
   host.on('joinRequest', ({ nickname }: { nickname: string }) => {
     attention('joinRequest')

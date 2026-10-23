@@ -338,6 +338,7 @@ function NetworkWarning() {
   const reconnecting = useApp((s) => !!s.client.reconnecting || !!s.client.signalLost)
   const signalLost = useApp((s) => !!s.client.signalLost)
   const autoLowered = useApp((s) => s.client.autoLowered)
+  const congested = useApp((s) => !!s.client.congested)
   const auto = useApp((s) => s.settings!.stream.autoQuality)
   const { address, quality } = useHostQuality()
   const unstable = (jitter ?? 0) >= 25 || (rtt ?? 0) >= 120
@@ -346,15 +347,16 @@ function NetworkWarning() {
   if (signalLost) text = t('stream.signalLost')
   else if (reconnecting) text = t('stream.reconnecting')
   else if (poor) text = auto ? t('stream.poorNetworkAuto') : t('stream.poorNetwork')
+  else if (congested) text = auto ? t('stream.congestedAuto') : t('stream.congested')
   else if (unstable) text = t('stream.unstable', { jitter: jitter ?? 0, rtt: rtt ?? 0 })
   else if (autoLowered) text = t('stream.autoLowered')
   return (
     <AnimatePresence initial={false}>
       {text && (
-        <motion.div className={`sc-warning ${autoLowered && !poor && !unstable && !reconnecting ? 'info' : ''}`} style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
+        <motion.div className={`sc-warning ${autoLowered && !poor && !congested && !unstable && !reconnecting ? 'info' : ''}`} style={{ overflow: 'hidden' }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={spring}>
           {reconnecting ? <RotateCw size={17} className="spin" /> : <TriangleAlert size={17} />}
           <span style={{ flex: 1 }}>{text}</span>
-          {!auto && !economy && !reconnecting && (poor || unstable) && (
+          {!auto && !economy && !reconnecting && (poor || congested || unstable) && (
             <Button size="sm" onClick={() => void applyHostQuality(address, PRESETS.economy)}>
               {t('stream.lowerQuality')}
             </Button>
@@ -377,6 +379,9 @@ export function StreamStats({ withMoonlight }: { withMoonlight?: boolean }) {
       rttMs: s.client.rttMs,
       jitterMs: s.client.jitterMs,
       speedMbps: s.client.speedMbps,
+      probe: s.client.probe,
+      queueMs: s.client.queueMs,
+      congested: s.client.congested,
       active: s.client.active,
       policy: s.client.policy,
       poorNetwork: s.client.poorNetwork,
@@ -391,8 +396,18 @@ export function StreamStats({ withMoonlight }: { withMoonlight?: boolean }) {
       value: c.rttMs !== undefined ? `${c.rttMs} ${t('stats.ms')}${c.jitterMs !== undefined ? ` ± ${c.jitterMs}` : ''}` : '—',
       tone: (c.jitterMs ?? 0) >= 25 || (c.rttMs ?? 0) >= 80 ? 'warn' : undefined
     },
-    { label: t('stats.channel'), value: c.speedMbps !== undefined ? t('settings.mbps', { value: c.speedMbps }) : t('stats.notMeasured') },
-    { label: t('stats.quality'), value: c.active ? summary(c.active, t) + (c.active.auto ? ` · ${t('stream.auto').toLowerCase()}` : '') : '—' },
+    {
+      label: t('stats.channel'),
+      // Замер по UDP, не упёршийся в канал: известно только, что канал не меньше.
+      value: c.speedMbps === undefined ? t('stats.notMeasured') : c.probe?.kind === 'udp' && !c.probe.saturated ? t('stats.atLeast', { value: c.speedMbps }) : t('settings.mbps', { value: c.speedMbps })
+    },
+    ...(c.queueMs !== undefined
+      ? [{ label: t('stats.queue'), value: c.congested ? `${c.queueMs} ${t('stats.ms')} · ${t('stats.congested')}` : `${c.queueMs} ${t('stats.ms')}`, tone: c.congested ? ('warn' as const) : undefined }]
+      : []),
+    {
+      label: t('stats.quality'),
+      value: c.active ? summary(c.active, t) + (c.active.codec ? ` · ${c.active.codec}` : '') + (c.active.auto ? ` · ${t('stream.auto').toLowerCase()}` : '') : '—'
+    },
     {
       label: t('stats.encoder'),
       value: enc ? [t(`host.encoders.${enc.vendor}`), [enc.av1 && 'AV1', enc.hevc && 'HEVC'].filter(Boolean).join(', ') || 'H.264'].join(' · ') : '—',
@@ -400,8 +415,8 @@ export function StreamStats({ withMoonlight }: { withMoonlight?: boolean }) {
     },
     {
       label: t('stats.network'),
-      value: c.poorNetwork ? t('stats.losing') : c.wifi ? t('stats.wifi') : t('stats.ok'),
-      tone: c.poorNetwork || c.wifi ? 'warn' : 'ok'
+      value: c.poorNetwork ? t('stats.losing') : c.congested ? t('stats.congested') : c.wifi ? t('stats.wifi') : t('stats.ok'),
+      tone: c.poorNetwork || c.congested || c.wifi ? 'warn' : 'ok'
     }
   ]
   return (

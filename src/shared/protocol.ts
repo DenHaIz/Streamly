@@ -34,11 +34,20 @@ export type ClientMessage =
   | { t: 'identifyPad' }
   /** Игрок уходит сам (а не обрыв связи): место не держим. */
   | { t: 'leave' }
+  /** Замер канала по UDP: хост выдаёт токен для регистрации UDP-адреса игрока (probeToken). */
+  | { t: 'probeOpen' }
+  /** Ступень замера: хост шлёт по UDP пакеты со скоростью kbps в течение ms, затем probeStepEnd. */
+  | { t: 'probeStep'; id: number; kbps: number; ms: number }
+  /** Итог замера у игрока: хост узнаёт, что его исходящий канал не меньше этого (потолок для нескольких игроков). */
+  | { t: 'probeResult'; capacityKbps: number; saturated: boolean }
+  /** Канал до хоста забит (очередь и потери по UDP-пингам держатся несколько секунд) или снова свободен. */
+  | { t: 'netCongestion'; on: boolean }
 
 export type HostMessage =
   | { t: 'hostInfo'; v: number; hostName: string; slotsUsed: number; maxSlots: number }
   /** needsPair: хост не знает этого клиента в Apollo, нужно сопряжение (хост — источник истины). */
-  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean; policy: StreamPolicy; resumeToken?: string }
+  /** features: что умеет хост ('udpProbe' — замер канала и пинги по UDP). */
+  | { t: 'joinAccepted'; trustToken?: string; perms: InputPerms; needsPair: boolean; policy: StreamPolicy; resumeToken?: string; features?: string[] }
   | { t: 'joinDenied'; reason: 'denied' | 'full' | 'version' | 'busy' }
   | { t: 'pairBegin'; pin: string }
   /** Очередь дошла: можно запускать Moonlight. */
@@ -69,6 +78,10 @@ export type HostMessage =
   | { t: 'pads'; list: { nickname: string; slot: number | null; you: boolean }[] }
   /** Ответ на identifyPad: номер геймпада (null — нажатия не было). */
   | { t: 'padIdentified'; slot: number | null }
+  /** Токен для UDP-замера и порт, куда его прислать (пустой токен — замер сейчас недоступен). */
+  | { t: 'probeToken'; token: string; port: number }
+  /** Ступень отправлена: сколько пакетов и с какой скоростью (хост мог снизить её, если кто-то уже играет). */
+  | { t: 'probeStepEnd'; id: number; sent: number; kbps: number }
 
 export type PairFailReason = 'client_timeout' | 'no_request' | 'apollo_error'
 
@@ -94,7 +107,11 @@ const CLIENT_TYPES = new Set([
   'inputRequest',
   'speedTest',
   'identifyPad',
-  'leave'
+  'leave',
+  'probeOpen',
+  'probeStep',
+  'probeResult',
+  'netCongestion'
 ])
 const HOST_TYPES = new Set([
   'hostInfo',
@@ -115,7 +132,9 @@ const HOST_TYPES = new Set([
   'resetGamepad',
   'policyUpdate',
   'pads',
-  'padIdentified'
+  'padIdentified',
+  'probeToken',
+  'probeStepEnd'
 ])
 
 const MAX_MESSAGE = 4096
@@ -151,6 +170,9 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
   if (m.t === 'inputRequest' && !isPerms(m.perms)) return null
   if (m.t === 'prefs' && (typeof m.muteChat !== 'boolean' || !isPerms(m.selfOff))) return null
   if (m.t === 'netStatus' && typeof m.poor !== 'boolean') return null
+  if (m.t === 'probeStep' && !(int(m.id, 0, 255) && int(m.kbps, 100, 1_000_000) && int(m.ms, 1, 10_000))) return null
+  if (m.t === 'probeResult' && !(int(m.capacityKbps, 0, 10_000_000) && typeof m.saturated === 'boolean')) return null
+  if (m.t === 'netCongestion' && typeof m.on !== 'boolean') return null
   return m as unknown as ClientMessage
 }
 
@@ -160,6 +182,7 @@ const isPerms = (v: unknown): v is InputPerms =>
 const isPolicy = (v: unknown): v is StreamPolicy => {
   if (!v || typeof v !== 'object') return false
   const p = v as Record<string, unknown>
+  if (p.fecPercent !== undefined && !int(p.fecPercent, 0, 100)) return false
   if (p.encoder !== undefined) {
     const e = p.encoder as Record<string, unknown> | null
     if (!e || typeof e !== 'object' || !['nvenc', 'amdvce', 'quicksync', 'software', 'other'].includes(e.vendor as string)) return false
@@ -190,6 +213,15 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
       if (!isPerms(m.perms) || !isPolicy(m.policy) || typeof m.needsPair !== 'boolean') return null
       if (m.trustToken !== undefined && !str(m.trustToken, 128)) return null
       if (m.resumeToken !== undefined && !(typeof m.resumeToken === 'string' && /^[\w-]{16,64}$/.test(m.resumeToken))) return null
+      if (m.features !== undefined) {
+        if (!Array.isArray(m.features) || m.features.length > 16 || !m.features.every((x) => str(x, 32))) return null
+      }
+      break
+    case 'probeToken':
+      if (!(typeof m.token === 'string' && /^[\w-]{0,16}$/.test(m.token)) || !int(m.port, 1, 65535)) return null
+      break
+    case 'probeStepEnd':
+      if (!int(m.id, 0, 255) || !int(m.sent, 0, 1_000_000) || !int(m.kbps, 0, 1_000_000)) return null
       break
     case 'policyUpdate':
       if (!isPolicy(m.policy)) return null

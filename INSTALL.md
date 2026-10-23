@@ -11,7 +11,7 @@
 
 ## 2. Streamly (один раз)
 
-1. Скачайте установщик: [Streamly-Setup-0.6.0.exe](https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.6.0.exe) (или возьмите файл у того, кто вас позвал).
+1. Скачайте установщик: [Streamly-Setup-0.6.1.exe](https://github.com/DenHaIz/Streamly/releases/latest/download/Streamly-Setup-0.6.1.exe) (или возьмите файл у того, кто вас позвал).
 2. Запустите его. Windows может показать синее окно «Windows защитила ваш компьютер»: нажмите «Подробнее» → «Выполнить в любом случае».
 3. При первом запуске выберите язык, тему и введите ник: его увидят друзья.
 

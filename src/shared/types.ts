@@ -7,6 +7,11 @@ export type Resolution = 'auto' | '720' | '1080' | '1440' | '4K'
 export type Codec = 'auto' | 'H.264' | 'HEVC' | 'AV1'
 export type DisplayMode = 'fullscreen' | 'borderless' | 'windowed'
 export type CaptureKeys = 'never' | 'fullscreen' | 'always'
+/**
+ * Отклик или качество: доля замеренного канала под видео (меньше — короче очередь в сети и ниже задержка),
+ * выравнивание кадров в Moonlight и выбор кодека AV1.
+ */
+export type StreamPriority = 'latency' | 'balanced' | 'quality'
 
 export interface StreamSettings {
   resolution: Resolution
@@ -29,6 +34,8 @@ export interface StreamSettings {
   muteHostChat: boolean
   /** Автоподбор качества: замер канала перед стартом и снижение при плохой связи. */
   autoQuality: boolean
+  /** Отклик ↔ качество (см. StreamPriority). */
+  priority: StreamPriority
   /** HDR (нужно включить HDR в Windows на обоих ПК). */
   hdr: boolean
   /** Цвет 4:4:4: чёткий текст, но больше трафика и нужна поддержка с обеих сторон. */
@@ -132,6 +139,8 @@ export interface StreamPolicy {
   hostFps: number
   /** Чем кодирует видео хост (по логу Apollo). */
   encoder?: HostEncoder
+  /** Доля избыточных пакетов (FEC) у хоста, % (для расчёта битрейта по каналу). */
+  fecPercent?: number
 }
 
 export type EncoderVendor = 'nvenc' | 'amdvce' | 'quicksync' | 'software' | 'other'
@@ -191,10 +200,21 @@ export interface Settings {
   recentHosts: RecentHost[]
   /** Своё качество для отдельных хостов (по адресу). */
   hostQuality: Record<string, QualityProfile>
+  /** Что известно о канале до хостов по прошлым подключениям (по адресу; автоподбор). */
+  netMemory: Record<string, NetMemoryEntry>
   updates: UpdateSettings
   /** Показывать редко нужные настройки. */
   showAdvanced: boolean
   hotkeys: HotkeySettings
+}
+
+/** Канал до хоста по прошлым подключениям. */
+export interface NetMemoryEntry {
+  /** Битрейт, который шёл без проблем (или до которого пришлось снизить), кбит/с. */
+  kbps: number
+  at: number
+  /** Сеть уже упиралась: следующий запуск — не выше kbps × 1,15. */
+  limited: boolean
 }
 
 /** Горячие клавиши (формат Electron: «Alt+F2», «Ctrl+Shift+F2»; пусто — выключена). */
@@ -254,7 +274,7 @@ export interface UpdateState {
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] }
 
-export const SETTINGS_SCHEMA = 5
+export const SETTINGS_SCHEMA = 6
 
 export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'language'> = {
   schema: SETTINGS_SCHEMA,
@@ -277,7 +297,9 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
     absoluteMouse: true,
     volume: 100,
     muteHostChat: true,
-    autoQuality: false,
+    // С 0.6.1 по умолчанию: замер канала по UDP, слежение за перегрузкой, память о канале до хоста.
+    autoQuality: true,
+    priority: 'balanced',
     hdr: false,
     yuv444: false,
     // Steam Input и DS4Windows у игрока показывают геймпад дважды: у хоста появлялось два. Один на ПК — частый случай.
@@ -318,6 +340,7 @@ export const DEFAULT_SETTINGS: Omit<Settings, 'deviceId' | 'nickname' | 'languag
   },
   recentHosts: [],
   hostQuality: {},
+  netMemory: {},
   updates: { auto: true, skipped: '' },
   showAdvanced: false,
   hotkeys: { ...DEFAULT_HOTKEYS }
@@ -485,8 +508,14 @@ export interface ClientState {
   measuring?: boolean
   /** Скорость канала от хоста по замеру, Мбит/с. */
   speedMbps?: number
-  /** С какими параметрами запущена трансляция. */
-  active?: { width: number; height: number; fps: number; bitrateKbps: number; auto: boolean }
+  /** Как мерили канал: по UDP (как идёт видео) или по TCP (старый хост). saturated — канал упёрся в замере. */
+  probe?: { kind: 'udp' | 'tcp'; saturated: boolean; baseLossPct?: number }
+  /** С какими параметрами запущена трансляция (codec — если Streamly выбрал кодек сам). */
+  active?: { width: number; height: number; fps: number; bitrateKbps: number; auto: boolean; codec?: Codec }
+  /** Очередь в сети до хоста сейчас, мс (по UDP-пингам): растёт, когда канал забивается. */
+  queueMs?: number
+  /** Канал забит (очередь или потери держатся несколько секунд). */
+  congested?: boolean
   /** Автоподбор снизил качество из-за плохой связи. */
   autoLowered?: boolean
   /** Подключение к сети по Wi-Fi (кабель надёжнее). */

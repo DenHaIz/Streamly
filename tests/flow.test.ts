@@ -150,6 +150,8 @@ class FakeMoonlight implements MoonlightLike {
   lastStream?: StreamSettings
   /** Moonlight сам теряет связь: пишет «Connection terminated» и закрывается. */
   drop: () => void = () => undefined
+  /** Строка в выводе текущего Moonlight (например, «Connection status update: 1»). */
+  say: (line: string) => void = () => undefined
   stream(_host: string, settings: StreamSettings): MoonlightProcess {
     this.lastStream = settings
     this.streams++
@@ -171,6 +173,7 @@ class FakeMoonlight implements MoonlightLike {
       listeners.forEach((cb) => cb('Connection terminated: -1'))
       proc.kill()
     }
+    this.say = (line) => listeners.forEach((cb) => cb(line))
     return proc
   }
 }
@@ -237,7 +240,8 @@ function setup(maxPlayers = 4, extra: Partial<HostDeps> = {}) {
 
   const makeClient = (nick: string, opts: { streamStartTimeoutMs?: number; pairTimeoutMs?: number; appVersion?: string; extra?: Partial<ClientDeps> } = {}) => {
     const settings = new SettingsService(tmp(), 'ru')
-    settings.update({ nickname: nick })
+    // Автоподбор (по умолчанию с 0.6.1) здесь выключен: эти проверки — о самом подключении, замер — в отдельных.
+    settings.update({ nickname: nick, stream: { autoQuality: false } })
     const moonlight = new FakeMoonlight(apollo)
     const client = new ClientController({
       settings,
@@ -693,9 +697,152 @@ describe('host ↔ client flow', () => {
     const st = client.getState()
     expect(st.speedMbps).toBeGreaterThan(0)
     expect(st.active?.auto).toBe(true)
+    // Новый хост: канал мерится по UDP, как идёт видео. Через loopback он быстрый — замер не упирается.
+    expect(st.probe).toMatchObject({ kind: 'udp', saturated: false })
     // Через loopback канал быстрый: упираемся в потолок хоста («Авто» для одного игрока — 20 Мбит/с).
     expect(moonlight.lastStream?.bitrateKbps).toBe(20000)
+    // Хост узнал, что его исходящий канал не меньше замера.
+    expect((host as unknown as { uplinkLower: number }).uplinkLower).toBeGreaterThanOrEqual(30000)
+    // Пинги по UDP идут: видна очередь в сети.
+    await waitFor(() => client.getState().queueMs !== undefined, 4000)
   }, 15000)
+
+  it('falls back to the TCP speed test with a host that has no UDP probe', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    // Хост версии до 0.6.1 (или порт поиска занят): в joinAccepted нет 'udpProbe'.
+    ;(host as unknown as { probe: null }).probe = null
+    const { client, settings } = makeClient('Вася')
+    settings.update({ stream: { autoQuality: true } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    expect(client.getState().probe).toMatchObject({ kind: 'tcp' })
+    expect(client.getState().speedMbps).toBeGreaterThan(0)
+  }, 15000)
+
+  it('remembers that the channel to a host had to be lowered and climbs back by 15%', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, settings, moonlight } = makeClient('Вася')
+    settings.update({ stream: { autoQuality: true } })
+    // В прошлый раз связь с этим хостом выдержала только 12 Мбит/с: старт — на 15% выше (замер даёт 20).
+    settings.rememberNet('127.0.0.1', { kbps: 12000, at: Date.now(), limited: true })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    expect(moonlight.lastStream?.bitrateKbps).toBe(14000)
+    // Если связь продержится, в этой же игре качество поднимется до замера.
+    expect((client as unknown as { memoryLimited: boolean }).memoryLimited).toBe(true)
+  }, 15000)
+
+  it('lowers the quality when the channel gets congested, before Moonlight starts losing frames', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    // Настоящие пинги здесь не нужны: задержку подставляем сами.
+    const { client, settings, moonlight } = makeClient('Вася', { extra: { pingIntervalMs: 600_000, congestionLowerGapMs: 600_000 } })
+    settings.update({ stream: { autoQuality: true } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    expect(moonlight.lastStream?.bitrateKbps).toBe(20000)
+    const watch = (client as unknown as { watch: { add(at: number, rtt: number | null): void } }).watch
+    for (let i = 0; i < 20; i++) watch.add(performance.now() - 4000 + i * 100, 5)
+    // Очередь в сети: задержка выросла на 150 мс и держится.
+    const pump = setInterval(() => watch.add(performance.now(), 155), 100)
+    try {
+      // Очередь должна держаться 8 с: короткие всплески игру не перезапускают.
+      await new Promise((r) => setTimeout(r, 5000))
+      expect(moonlight.streams).toBe(1)
+      await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming' && !client.getState().restarting, 10_000)
+      // Второй раз из-за одной очереди не снижаем (она бывает и не из-за нашего потока).
+      await new Promise((r) => setTimeout(r, 10_000))
+      expect(moonlight.streams).toBe(2)
+    } finally {
+      clearInterval(pump)
+    }
+    expect(moonlight.lastStream?.bitrateKbps).toBe(15000)
+    expect(client.getState().autoLowered).toBe(true)
+    // Снижение только по очереди в память о канале не идёт (очередь бывает и не из-за канала).
+    expect(settings.get().netMemory['127.0.0.1']).toBeUndefined()
+  }, 40000)
+
+  it('lowers the quality when Moonlight keeps losing frames and remembers it for this host', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const { client, settings, moonlight } = makeClient('Вася', { extra: { autoLowerAfterMs: 300 } })
+    settings.update({ stream: { autoQuality: true } })
+    cleanups.push(() => client.cancel())
+    await joined(host, client)
+    moonlight.say('00:01:02 - SDL Info (0): Connection status update: 1')
+    await waitFor(() => moonlight.streams === 2 && client.getState().phase === 'streaming' && !client.getState().restarting)
+    expect(moonlight.lastStream?.bitrateKbps).toBe(14000)
+    expect(settings.get().netMemory['127.0.0.1']).toMatchObject({ kbps: 14000, limited: true })
+  }, 15000)
+
+  it('picks HEVC or AV1 when both graphics cards can do it', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    ;(host as unknown as { encoder: unknown }).encoder = { vendor: 'nvenc', hevc: true, av1: true }
+    const decoders = async () => ({ h264: true, hevc: true, av1: true })
+    const a = makeClient('Вася', { extra: { decoders } })
+    cleanups.push(() => a.client.cancel())
+    await joined(host, a.client)
+    expect(a.moonlight.lastStream?.codec).toBe('HEVC')
+    expect(a.client.getState().active?.codec).toBe('HEVC')
+    // «Качество» — AV1.
+    const b = makeClient('Петя', { extra: { decoders } })
+    b.settings.update({ stream: { priority: 'quality' } })
+    cleanups.push(() => b.client.cancel())
+    await joined(host, b.client)
+    expect(b.moonlight.lastStream?.codec).toBe('AV1')
+    // Кодек, выбранный вручную, не трогаем.
+    const c = makeClient('Коля', { extra: { decoders } })
+    c.settings.update({ stream: { codec: 'H.264' } })
+    cleanups.push(() => c.client.cancel())
+    await joined(host, c.client)
+    expect(c.moonlight.lastStream?.codec).toBe('H.264')
+  }, 20000)
+
+  it('sets the per-player cap by the host upload: higher with a proven wide channel, lower for newcomers once it saturates', async () => {
+    const { host, makeClient } = setup()
+    cleanups.push(() => host.stop())
+    await host.start()
+    const a = makeClient('Вася')
+    const b = makeClient('Петя')
+    const c = makeClient('Коля')
+    for (const p of [a, b, c]) {
+      p.settings.update({ stream: { bitrateKbps: 50000 } })
+      cleanups.push(() => p.client.cancel())
+    }
+    await joined(host, a.client)
+    // Замер показал исходящий канал хоста не меньше 60 Мбит/с: двоим по 18 (таблица дала бы 15).
+    ;(host as unknown as { uplinkLower: number }).uplinkLower = 60000
+    await joined(host, b.client)
+    expect(b.client.getState().policy?.maxBitrateKbps).toBe(18000)
+    await waitFor(() => host.getState().players.every((p) => p.status === 'streaming'))
+    const upper = (): unknown => (host as unknown as { uplinkUpper: unknown }).uplinkUpper
+    const congest = (): void => {
+      for (const p of [a, b]) (p.client as unknown as { send(m: unknown): void }).send({ t: 'netCongestion', on: true })
+    }
+    // Проблемы у обоих, но хост отдаёт мало (10 Мбит/с при потоках на 36): это их сети, не канал хоста.
+    ;(host as unknown as { upload: unknown }).upload = { bytes: 0, at: 0, mbps: 10 }
+    congest()
+    await new Promise((r) => setTimeout(r, 300))
+    expect(upper()).toBeNull()
+    // Хост отдаёт 30 Мбит/с — почти всё, что нужно двум потокам: его канал упёрся.
+    ;(host as unknown as { upload: unknown }).upload = { bytes: 0, at: 0, mbps: 30 }
+    congest()
+    await waitFor(() => upper() !== null)
+    // Играющим потолок не снижают (и не перезапускают).
+    await new Promise((r) => setTimeout(r, 300))
+    expect(a.client.getState().policy?.maxBitrateKbps).toBe(18000)
+    // Новому игроку — осторожнее: 0,75 × 30 / 3 = 7,5, но не ниже 75% таблицы (12 → 9).
+    await joined(host, c.client)
+    expect(c.client.getState().policy?.maxBitrateKbps).toBe(9000)
+  }, 20000)
 
   it('applies the Apollo default encoder preset (as in 0.1) by default', async () => {
     const { apollo, host } = setup()

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { sanitizeNickname } from '@shared/protocol'
-import { DEFAULT_HOTKEYS, DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type EncoderCustom, type HotkeySettings, type QualityProfile, type Settings } from '@shared/types'
+import { DEFAULT_HOTKEYS, DEFAULT_SETTINGS, SETTINGS_SCHEMA, type DeepPartial, type EncoderCustom, type HotkeySettings, type NetMemoryEntry, type QualityProfile, type Settings } from '@shared/types'
 import { migratePreset } from '@shared/quality'
 import { isAccelerator } from '@shared/hotkeys'
 import { deepMerge, JsonFile, type Cipher } from './store'
@@ -43,6 +43,19 @@ function normalizeHostQuality(v: unknown): Record<string, QualityProfile> {
     if (prof) out[addr] = prof
   }
   return out
+}
+
+/** Память о канале до хостов: адрес → битрейт; не больше 16 хостов, самые свежие. */
+export function normalizeNetMemory(v: unknown): Record<string, NetMemoryEntry> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+  const list: [string, NetMemoryEntry][] = []
+  for (const [addr, e] of Object.entries(v as Record<string, Partial<NetMemoryEntry> | null>)) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(addr) || !e || typeof e !== 'object') continue
+    const at = Number(e.at)
+    if (!Number.isFinite(at) || at <= 0) continue
+    list.push([addr, { kbps: clampInt(e.kbps, 500, 150000, 2500), at, limited: e.limited === true }])
+  }
+  return Object.fromEntries(list.sort((a, b) => b[1].at - a[1].at).slice(0, 16))
 }
 
 function normalizeEncoder(c: Partial<EncoderCustom> | undefined): EncoderCustom {
@@ -115,6 +128,12 @@ export function normalizeSettings(s: Settings): Settings {
   // Версия 4: пресет кодировщика по умолчанию был «Баланс» (NVENC P3); теперь умолчание Apollo, как в 0.1.
   const v4 = !(Number(s.schema) >= 5)
   const presetIn = v4 && s.host?.encoderPreset === 'balanced' ? 'latency' : s.host?.encoderPreset
+  // Версия 5: автоподбор качества был выключен по умолчанию. С 0.6.1 он мерит канал по UDP, следит
+  // за перегрузкой и помнит канал до хоста — включаем тем, кто качество сам не выбирал (битрейт «авто»
+  // и нет своего качества для хостов): выбранное вручную, например «Экономно» для слабого канала, не трогаем.
+  const v5 = !(Number(s.schema) >= 6)
+  const manual = (st?.bitrateKbps ?? 0) !== 0 || (!!s.hostQuality && typeof s.hostQuality === 'object' && Object.keys(s.hostQuality).length > 0)
+  const autoIn = v5 && !manual ? true : st?.autoQuality
   const display = typeof s.host?.display === 'string' ? s.host.display : legacyVirtual ? 'virtual' : d.host.display
   return {
     schema: SETTINGS_SCHEMA,
@@ -139,7 +158,8 @@ export function normalizeSettings(s: Settings): Settings {
       absoluteMouse: bool(st?.absoluteMouse, d.stream.absoluteMouse),
       volume: clampInt(st?.volume, 0, 100, d.stream.volume),
       muteHostChat: bool(st?.muteHostChat, d.stream.muteHostChat),
-      autoQuality: bool(st?.autoQuality, d.stream.autoQuality),
+      autoQuality: bool(autoIn, d.stream.autoQuality),
+      priority: oneOf(st?.priority, ['latency', 'balanced', 'quality'] as const, d.stream.priority),
       hdr: bool(st?.hdr, d.stream.hdr),
       yuv444: bool(st?.yuv444, d.stream.yuv444),
       singleGamepad: bool(st?.singleGamepad, d.stream.singleGamepad),
@@ -164,6 +184,7 @@ export function normalizeSettings(s: Settings): Settings {
       gameNotify: bool(s.host?.gameNotify, d.host.gameNotify)
     },
     hostQuality: normalizeHostQuality(hostQualityIn),
+    netMemory: normalizeNetMemory(s.netMemory),
     updates: {
       auto: bool(s.updates?.auto, d.updates.auto),
       skipped: typeof s.updates?.skipped === 'string' && /^[\w.+-]{0,32}$/.test(s.updates.skipped) ? s.updates.skipped : ''
@@ -217,6 +238,17 @@ export class SettingsService extends EventEmitter {
     this.file.set(next)
     this.emit('change', next)
     return next
+  }
+
+  /** Запомнить канал до хоста (null — забыть). */
+  rememberNet(address: string, entry: NetMemoryEntry | null): void {
+    const cur = this.file.get()
+    const mem = { ...cur.netMemory }
+    if (entry) mem[address] = entry
+    else delete mem[address]
+    const next = normalizeSettings({ ...cur, netMemory: mem })
+    this.file.set(next)
+    this.emit('change', next)
   }
 
   rememberHost(address: string, name: string): void {

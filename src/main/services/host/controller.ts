@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { effectivePerms, NO_INPUT, toApolloPerm, type InputPerms } from '@shared/perms'
 import {
+  DISCOVERY_PORT,
   makeInviteLink,
   parseClientMessage,
   PROTOCOL_VERSION,
@@ -38,6 +39,8 @@ import type { ApolloInstallStatus, SetupOptions } from '../apollo/installer'
 import type { ElevatedResult } from '../../elevate'
 import type { SecretsService, SettingsService, TrustedFriend } from '../../settings'
 import { DiscoveryResponder, isAllowedPeer } from '../net/discovery'
+import { ProbeHost } from '../net/probe'
+import { PROBE_MAX_KBPS } from '@shared/netprobe'
 
 export type ApolloLike = Pick<
   ApolloApi,
@@ -146,6 +149,11 @@ interface Peer {
   /** После отказа повторная просьба не раньше этого времени. */
   inputRequestBlockedUntil?: number
   lastSpeedTest?: number
+  /** Токен UDP-замера и пингов этого игрока. */
+  probeToken?: string
+  lastProbeOpen?: number
+  /** Когда игрок последний раз сообщил о проблемах со связью (плохая связь у Moonlight или забитый канал). */
+  troubleAt?: number
   /** Игрок сам отключился: место после закрытия соединения не держим. */
   leaving?: boolean
   /** Хэш токена возобновления, выданного при допуске (возвращение после короткого обрыва). */
@@ -220,6 +228,9 @@ function encoderConfig(h: HostSettings): Record<string, string> {
 const SPEED_TEST_BYTES = 4 * 1024 * 1024
 const SPEED_CHUNK = randomBytes(64 * 1024)
 const SPEED_TEST_EVERY_MS = 20_000
+
+/** Сколько помнить, что исходящий канал хоста упирался (сеть могла освободиться). */
+const UPLINK_MEMORY_MS = 10 * 60_000
 
 /** Во время чужой игры замер скромнее и порциями: уже играющие не должны получить рывок. */
 const SPEED_TEST_SHARED_BYTES = 1536 * 1024
@@ -309,6 +320,12 @@ export class HostController extends EventEmitter {
   private readonly padsSent = new Map<string, string>()
   /** Потолок битрейта, который игроки получили последним (перераспределение при смене числа игроков). */
   private lastCap = 0
+  /** UDP-замер канала и пинги игроков (через порт поиска). */
+  private probe: ProbeHost | null = null
+  /** Исходящий канал хоста не меньше этого, кбит/с: лучший замер канала до кого-то из игроков. */
+  private uplinkLower = 0
+  /** Исходящий канал хоста упёрся на этом значении (у двух игроков сразу проблемы со связью), кбит/с. */
+  private uplinkUpper: { kbps: number; at: number } | null = null
 
   constructor(private readonly d: HostDeps) {
     super()
@@ -828,10 +845,12 @@ export class HostController extends EventEmitter {
     wss.on('error', (e) => this.log('signaling server error', e))
     wss.on('connection', (ws, req) => this.onConnection(ws, req.socket.remoteAddress ?? ''))
 
+    const probe = new ProbeHost((buf, port, addr) => discovery.send(buf, port, addr))
     const discovery = new DiscoveryResponder(
       () => ({ hostName: this.d.settings.get().nickname, slotsUsed: this.admittedCount, maxSlots: this.d.settings.get().host.maxPlayers }),
       this.d.discoveryPort,
-      this.allowedExtra()
+      this.allowedExtra(),
+      (msg, rinfo) => probe.onPacket(msg, rinfo)
     )
     try {
       await discovery.start()
@@ -840,6 +859,7 @@ export class HostController extends EventEmitter {
         throw new Cancelled()
       }
       this.discovery = discovery
+      this.probe = probe
     } catch (e) {
       if (e instanceof Cancelled) throw e
       // Поиск не обязателен: к хосту всегда можно подключиться по IP.
@@ -905,6 +925,8 @@ export class HostController extends EventEmitter {
     this.activeLaunch = null
     this.discovery?.stop()
     this.discovery = null
+    this.probe?.clear()
+    this.probe = null
     const wss = this.wss
     await Promise.race([new Promise<void>((r) => (wss ? wss.close(() => r()) : r())), sleep(3000)])
     clearTimeout(cut)
@@ -932,6 +954,8 @@ export class HostController extends EventEmitter {
     this.padsInit = false
     this.padsSent.clear()
     this.lastCap = 0
+    this.uplinkLower = 0
+    this.uplinkUpper = null
     // Служба Apollo нужна только на время хостинга: после перезагрузки ПК она сама не запустится.
     if (wasActive && this.serviceControl) await this.d.installer.stopService().catch(() => false)
     this.starting = false
@@ -1164,6 +1188,7 @@ export class HostController extends EventEmitter {
 
   private async onClose(peer: Peer): Promise<void> {
     if (!this.peers.delete(peer.id)) return
+    this.probe?.close(peer.probeToken)
     this.launchQueue = this.launchQueue.filter((id) => id !== peer.id)
     this.pumpLaunches()
     if (peer.deviceId && peer.admitted) {
@@ -1368,7 +1393,7 @@ export class HostController extends EventEmitter {
       case 'speedTest': {
         if (!peer.admitted || Date.now() - (peer.lastSpeedTest ?? 0) < SPEED_TEST_EVERY_MS) return this.send(peer, { t: 'speedEnd', bytes: 0 })
         peer.lastSpeedTest = Date.now()
-        const shared = this.graces.size > 0 || [...this.peers.values()].some((p) => p !== peer && p.admitted && p.status === 'streaming')
+        const shared = this.othersStreaming(peer)
         if (!shared) {
           // Без сжатия и подряд: клиент считает скорость по времени прихода кусков.
           for (let sent = 0; sent < SPEED_TEST_BYTES; sent += SPEED_CHUNK.length) {
@@ -1400,10 +1425,97 @@ export class HostController extends EventEmitter {
         if (peer.admitted && peer.poorNetwork !== msg.poor) {
           peer.poorNetwork = msg.poor
           if (msg.poor) this.log(`poor network reported by ${peer.nickname} (rtt ${peer.rttMs ?? '?'} ms)`)
+          if (msg.poor) this.onTrouble(peer)
           this.emitState()
         }
         return
+      case 'netCongestion':
+        if (!peer.admitted) return
+        if (msg.on) {
+          this.log(`congestion reported by ${peer.nickname} (upload ${this.upload?.mbps ?? '?'} Mbit/s)`)
+          this.onTrouble(peer)
+        } else if (!peer.poorNetwork) peer.troubleAt = undefined
+        return
+      case 'probeOpen': {
+        const port = this.discovery?.boundPort ?? this.d.discoveryPort ?? DISCOVERY_PORT
+        if (!peer.admitted || !this.probe || Date.now() - (peer.lastProbeOpen ?? 0) < 3000) return this.send(peer, { t: 'probeToken', token: '', port })
+        peer.lastProbeOpen = Date.now()
+        peer.probeToken = this.probe.open(peer.address, peer.probeToken)
+        return this.send(peer, { t: 'probeToken', token: peer.probeToken, port })
+      }
+      case 'probeStep': {
+        const token = peer.probeToken
+        const none = (): void => this.send(peer, { t: 'probeStepEnd', id: msg.id, sent: 0, kbps: 0 })
+        if (!peer.admitted || !this.probe || !token) return none()
+        // Кто-то уже играет: исходящий канал общий, и ступени замера дали бы играющим рывок. Отказываем —
+        // клиент перейдёт на прежний мягкий замер по TCP (порциями с паузами), поэтому время замера не отмечаем.
+        if (this.othersStreaming(peer)) return none()
+        if (msg.id === 0) {
+          // Новый замер — не чаще раза в 20 с (как и прежний замер по TCP).
+          if (Date.now() - (peer.lastSpeedTest ?? 0) < SPEED_TEST_EVERY_MS) return none()
+          peer.lastSpeedTest = Date.now()
+          this.probe.resetSteps(token)
+        }
+        if (!this.probe.canStep(token)) return none()
+        const kbps = Math.min(PROBE_MAX_KBPS, msg.kbps)
+        const sent = await this.probe.step(token, msg.id, kbps, msg.ms)
+        return this.send(peer, { t: 'probeStepEnd', id: msg.id, sent, kbps })
+      }
+      case 'probeResult':
+        if (!peer.admitted || msg.capacityKbps <= this.uplinkLower) return
+        // Канал до игрока не шире исходящего канала хоста: значит, исходящий не меньше замера.
+        this.uplinkLower = Math.min(msg.capacityKbps, 1_000_000)
+        this.log(`channel to ${peer.nickname}: ${Math.round(msg.capacityKbps / 100) / 10} Mbit/s${msg.saturated ? '' : ' or more'}`)
+        this.rebalance()
+        return
     }
+  }
+
+  /** Кто-то, кроме этого игрока, играет (или возвращается после обрыва). */
+  private othersStreaming(peer: Peer): boolean {
+    return this.graces.size > 0 || [...this.peers.values()].some((p) => p !== peer && p.admitted && p.status === 'streaming')
+  }
+
+  /**
+   * У игрока проблемы со связью. Если одновременно у двух и больше играющих — скорее всего, упёрся исходящий
+   * канал хоста: запоминаем, сколько он отдавал в этот момент, и новым игрокам и перераспределению потолка
+   * это служит пределом. (Каждый игрок и так снижает себе битрейт сам.)
+   */
+  private onTrouble(peer: Peer): void {
+    const now = Date.now()
+    peer.troubleAt = now
+    const playing = [...this.peers.values()].filter((p) => p.admitted && p.status === 'streaming')
+    const troubled = playing.filter((p) => p.troubleAt && now - p.troubleAt < 10_000)
+    const mbps = this.upload?.mbps
+    if (playing.length < 2 || troubled.length < 2 || !mbps || mbps < 5) return
+    // Канал хоста упёрся, только если он отдаёт почти столько, сколько потоки игроков на потолке
+    // (видео + FEC). Иначе проблемы у игроков — их собственные (Wi-Fi, ретранслятор), а не хоста.
+    const full = (playing.length * autoBitrateCap(this.admittedCount) * 1.2) / 1000
+    if (mbps < full * 0.8) return
+    const kbps = Math.round(mbps * 1000)
+    if (this.uplinkUpper && now - this.uplinkUpper.at < UPLINK_MEMORY_MS && kbps >= this.uplinkUpper.kbps) return
+    this.uplinkUpper = { kbps, at: now }
+    // Только для тех, кто подключится позже (см. autoCap): играющих не трогаем.
+    this.log(`upload looks saturated at ${mbps} Mbit/s (${troubled.length} players with network trouble)`)
+  }
+
+  /**
+   * Потолок «Авто» на игрока: по таблице (как в 0.1: 20 Мбит/с одному, меньше нескольким), но
+   * — выше таблицы, если замер показал широкий исходящий канал хоста (и всё равно не выше 20 Мбит/с, как в 0.1);
+   * — для новых игроков (forJoin) ниже, если канал хоста уже упирался, но не ниже 75% таблицы. Играющим
+   *   из-за этого трансляцию не перезапускаем: каждый и так снижает себе битрейт сам.
+   */
+  private autoCap(forJoin = false): number {
+    const n = Math.max(1, this.admittedCount)
+    const table = autoBitrateCap(n)
+    let cap = table
+    if (this.uplinkLower) cap = Math.max(cap, Math.min(AUTO_BITRATE_CAP_MAX, Math.floor((0.6 * this.uplinkLower) / n / 500) * 500))
+    const up = this.uplinkUpper
+    if (forJoin && up && Date.now() - up.at < UPLINK_MEMORY_MS) {
+      const floor = Math.floor((table * 0.75) / 500) * 500
+      cap = Math.min(cap, Math.max(floor, Math.floor((0.75 * up.kbps) / n / 500) * 500))
+    }
+    return cap
   }
 
   private pumpLaunches(): void {
@@ -1425,7 +1537,7 @@ export class HostController extends EventEmitter {
   }
 
   /** Условия трансляции для игроков: звук на хосте, потолок битрейта, монитор хоста. */
-  policy(): StreamPolicy {
+  policy(forJoin = false): StreamPolicy {
     const h = this.d.settings.get().host
     // Виртуальный монитор создаётся под разрешение игрока: ограничивать нечего.
     const chosen = this.displays.find((d) => d.id === h.display)
@@ -1434,7 +1546,8 @@ export class HostController extends EventEmitter {
       // Через виртуальные колонки: Apollo захватывает их, а хост слышит игру через повтор помощника.
       hostAudio: this.routingMode ? false : h.keepHostAudio,
       // «Авто»: потолок зависит от числа игроков на момент допуска (вместе с этим игроком).
-      maxBitrateKbps: h.maxBitrateKbps === -1 ? autoBitrateCap(this.admittedCount) : h.maxBitrateKbps,
+      maxBitrateKbps: h.maxBitrateKbps === -1 ? this.autoCap(forJoin) : h.maxBitrateKbps,
+      fecPercent: FEC[h.lossProtection],
       hostWidth: mode?.width ?? 0,
       hostHeight: mode?.height ?? 0,
       hostFps: mode?.fps ?? 0,
@@ -1554,7 +1667,7 @@ export class HostController extends EventEmitter {
     // Только Streamly 0.5+: старые версии не умеют ни возвращаться, ни сообщать, что уходят сами.
     const resumeToken = versionAtLeast(peer.appVersion, '0.5.0') ? randomBytes(18).toString('base64url') : undefined
     peer.resumeHash = resumeToken ? sha256(resumeToken) : undefined
-    this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy(), resumeToken })
+    this.send(peer, { t: 'joinAccepted', trustToken: token, perms: f.perms, needsPair, policy: this.policy(true), resumeToken, features: this.probe ? ['udpProbe'] : [] })
     this.rebalance(peer)
     this.pushPads()
     const audio = this.audioView()

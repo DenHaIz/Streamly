@@ -68,9 +68,12 @@ const streamingDemo: ClientState = {
   poorNetwork: params.get('poor') === '1',
   hostChat: { control: params.get('nochat') !== '1', excluded: true },
   speedMbps: params.get('poor') === '1' ? 8 : 74,
+  probe: { kind: 'udp', saturated: params.get('poor') === '1', baseLossPct: 0 },
+  queueMs: params.get('poor') === '1' ? 62 : 3,
+  congested: params.get('poor') === '1',
   wifi: params.get('poor') === '1',
   relaySuspect: params.get('poor') === '1',
-  active: { width: 2560, height: 1440, fps: 60, bitrateKbps: 20000, auto: false },
+  active: { width: 2560, height: 1440, fps: 60, bitrateKbps: 20000, auto: true, codec: 'HEVC' },
   pads: [
     { nickname: 'Алексей', slot: 2, you: true },
     { nickname: 'Петя', slot: null, you: false }

@@ -1,7 +1,7 @@
 {
   "name": "streamly",
   "productName": "Streamly",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Простой стриминг рабочего стола для друзей через Radmin VPN (Apollo + Moonlight)",
   "main": "out/main/index.js",
   "license": "GPL-3.0-only",

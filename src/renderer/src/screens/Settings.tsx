@@ -4,7 +4,7 @@ import { currentPreset, PRESETS, type Preset } from '@/lib/quality'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { InputPerms } from '@shared/perms'
-import type { Codec, DisplayMode, EncoderPreset, HostDisplay, Lang, LossProtection, Resolution, CaptureKeys, ThemePref, TrustedFriendView } from '@shared/types'
+import type { Codec, DisplayMode, EncoderPreset, HostDisplay, Lang, LossProtection, Resolution, CaptureKeys, StreamPriority, ThemePref, TrustedFriendView } from '@shared/types'
 import { useApp, type SettingsTab } from '@/store/app'
 import { api } from '@/lib/bridge'
 import { PixelLogo } from '@/components/PixelLogo'
@@ -220,6 +220,14 @@ function StreamTab() {
         <div className="section-title">{t('settings.quality')}</div>
         <Row title={t('settings.autoQuality')} hint={t('settings.autoQualityHint')}>
           <Switch checked={st.autoQuality} onChange={(v) => set({ autoQuality: v })} />
+        </Row>
+        <Row title={t('settings.priority')} hint={t(`settings.priorityHint.${st.priority}`)}>
+          <Segmented<StreamPriority>
+            value={st.priority}
+            // «Качество» включает выравнивание кадров в Moonlight, остальные — выключают (кадр показывается сразу).
+            onChange={(v) => set({ priority: v, framePacing: v === 'quality' })}
+            options={(['latency', 'balanced', 'quality'] as const).map((v) => ({ value: v, label: t(`settings.priorities.${v}`) }))}
+          />
         </Row>
         <div className="preset-block" style={{ opacity: st.autoQuality ? 0.5 : 1 }}>
           <Segmented<Preset | 'custom'>

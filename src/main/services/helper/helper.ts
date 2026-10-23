@@ -209,6 +209,11 @@ export class Helper extends EventEmitter {
     return this.call<string[]>('gpus', {}, 8000)
   }
 
+  /** Какие кодеки видеокарта этого ПК декодирует аппаратно (D3D11, как у Moonlight). */
+  decoders(): Promise<{ h264: boolean; hevc: boolean; av1: boolean }> {
+    return this.call<{ h264: boolean; hevc: boolean; av1: boolean }>('decoders', {}, 8000)
+  }
+
   netInfo(): Promise<NetAdapter[]> {
     return this.call<NetAdapter[]>('netInfo')
   }

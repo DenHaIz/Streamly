@@ -28,6 +28,11 @@ export function autoProfile(speedMbps: number, base: Pick<StreamSettings, 'resol
   return profileFor(bitrateKbps, base)
 }
 
+/** Профиль под заданный битрейт: разрешение и частота по нему, не выше выбранных игроком. */
+export function profileForBitrate(bitrateKbps: number, base: Pick<StreamSettings, 'resolution' | 'fps'>): QualityProfile {
+  return profileFor(bitrateKbps, base)
+}
+
 function profileFor(bitrateKbps: number, base: Pick<StreamSettings, 'resolution' | 'fps'>): QualityProfile {
   return {
     resolution: lowerRes(base.resolution, resolutionFor(bitrateKbps)),
@@ -36,11 +41,11 @@ function profileFor(bitrateKbps: number, base: Pick<StreamSettings, 'resolution'
   }
 }
 
-/** На ступень ниже (битрейт ×0,7) после устойчивой плохой связи. null — ниже уже некуда. */
-export function lowerProfile(p: QualityProfile, base: Pick<StreamSettings, 'resolution' | 'fps'>): QualityProfile | null {
+/** На ступень ниже (битрейт ×factor) после устойчивой плохой связи. null — ниже уже некуда. */
+export function lowerProfile(p: QualityProfile, base: Pick<StreamSettings, 'resolution' | 'fps'>, factor = 0.7): QualityProfile | null {
   if (p.bitrateKbps > 0 && p.bitrateKbps <= MIN_BITRATE) return null
   const from = p.bitrateKbps > 0 ? p.bitrateKbps : 20000
-  return profileFor(Math.max(MIN_BITRATE, Math.round((from * 0.7) / 500) * 500), base)
+  return profileFor(Math.max(MIN_BITRATE, Math.round((from * factor) / 500) * 500), base)
 }
 
 /**

@@ -5,8 +5,20 @@ import { parseHostMessage, PROTOCOL_VERSION, SIGNALING_PORT, type ClientMessage,
 import type { ClientState, DiscoveredHost, ErrorCode, HostSource, QualityProfile, StreamPolicy, StreamSettings } from '@shared/types'
 import type { SecretsService, SettingsService } from '../../settings'
 import { streamParams, type MoonlightProcess } from '../moonlight/runner'
-import { autoProfile, lowerProfile, relaySuspect } from './quality'
+import { autoProfile, lowerProfile, profileForBitrate, relaySuspect } from './quality'
 import type { ProbeResult } from '../net/discovery'
+import { measureChannel, ProbeClient, type AskStep } from '../net/probe'
+import {
+  bitrateForCapacity,
+  chooseCodec,
+  CongestionWatch,
+  naturalBitrate,
+  NET_MEMORY_TTL_MS,
+  probeTarget,
+  startBitrate,
+  type DecoderCaps,
+  type ProbeOutcome
+} from '@shared/netprobe'
 
 export interface MoonlightLike {
   readonly available: boolean
@@ -59,6 +71,14 @@ export interface ClientDeps {
   hungCheckMs?: number
   /** Сколько пытаться вернуться к хосту после обрыва сигнального соединения. */
   resumeWindowMs?: number
+  /** Какие кодеки видеокарта этого ПК декодирует аппаратно (для выбора HEVC или AV1). */
+  decoders?: () => Promise<DecoderCaps | undefined>
+  /** Пинги до хоста по UDP (слежение за перегрузкой), мс. */
+  pingIntervalMs?: number
+  /** Сколько связь должна идти без проблем, чтобы запомнить битрейт удачным. */
+  netCleanMs?: number
+  /** Не чаще: снижение качества из-за забитого канала. */
+  congestionLowerGapMs?: number
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -151,6 +171,27 @@ export class ClientController extends EventEmitter {
   private resumeStarted = 0
   private resumeTimer: NodeJS.Timeout | null = null
   private hungTimer: NodeJS.Timeout | null = null
+  /** Что умеет хост (из joinAccepted). */
+  private features: string[] = []
+  /** UDP-сокет до хоста: замер канала и пинги. */
+  private probeClient: ProbeClient | null = null
+  private probeOpening: Promise<ProbeClient | null> | null = null
+  private tokenWaiter: ((token: string, port: number) => void) | null = null
+  private readonly stepWaiters = new Map<number, (r: { sent: number; kbps: number } | null) => void>()
+  private readonly watch = new CongestionWatch()
+  /** Раз в секунду: перегрузка канала и память о канале до хоста. */
+  private netTimer: NodeJS.Timeout | null = null
+  private congestionSent = false
+  /** Снижения подряд только из-за очереди (без потерь у Moonlight): больше двух — дело не в нашем битрейте. */
+  private delayLowers = 0
+  /** С какого момента связь идёт без проблем (для памяти о канале). */
+  private cleanSince = 0
+  private cleanSaved = false
+  /** Битрейт по замеру канала (без учёта памяти о прошлых подключениях). */
+  private probeKbps: number | undefined
+  /** Старт ограничила память о канале (ниже замера): если связь держится, в этой же игре поднимаемся до замера. */
+  private memoryLimited = false
+  private decoderCaps: DecoderCaps | undefined
   private identifyTimer: NodeJS.Timeout | null = null
   private inputRequestTimer: NodeJS.Timeout | null = null
 
@@ -243,7 +284,19 @@ export class ClientController extends EventEmitter {
     this.auto = null
     this.measuredAuto = null
     this.measured = false
+    this.probeKbps = undefined
+    this.memoryLimited = false
+    this.delayLowers = 0
+    this.features = []
     this.reconnects = []
+    if (!this.decoderCaps && this.d.decoders) {
+      void this.d
+        .decoders()
+        .then((c) => {
+          if (c) this.decoderCaps = c
+        })
+        .catch(() => undefined)
+    }
     this.set({
       phase: 'connecting',
       host: { address, name: this.hosts.get(address)?.name ?? address },
@@ -261,6 +314,9 @@ export class ClientController extends EventEmitter {
       reconnecting: false,
       measuring: false,
       speedMbps: undefined,
+      probe: undefined,
+      queueMs: undefined,
+      congested: false,
       active: undefined,
       pads: undefined,
       padIdentify: undefined,
@@ -394,6 +450,9 @@ export class ClientController extends EventEmitter {
       case 'joinAccepted': {
         if (this.state.phase !== 'waitingApproval' && !this.resuming) return
         if (msg.resumeToken) this.resume = { address, token: msg.resumeToken }
+        this.features = msg.features ?? []
+        // Новое сигнальное соединение — новый токен UDP: прежний хост закрыл вместе со старым соединением.
+        this.closeProbe()
         if (this.resuming) {
           // Вернулись к хосту: трансляция всё это время шла, ничего не перезапускаем.
           this.resuming = false
@@ -404,6 +463,7 @@ export class ClientController extends EventEmitter {
           this.log('back with the host after a short drop')
           this.set({ signalLost: false, perms: msg.perms, policy: msg.policy })
           this.sendPrefs()
+          void this.ensureProbe(attempt, address)
           // Трансляция шла всё это время: только проверяем, не снизил ли хост потолок, пока нас не было.
           if (this.streamProc) return this.checkCap()
           // Moonlight закрылся ради перезапуска во время обрыва — запускаем сейчас.
@@ -506,6 +566,15 @@ export class ClientController extends EventEmitter {
         return
       case 'speedEnd':
         return this.onSpeedEnd(msg.bytes)
+      case 'probeToken':
+        this.tokenWaiter?.(msg.token, msg.port)
+        return
+      case 'probeStepEnd': {
+        const w = this.stepWaiters.get(msg.id)
+        this.stepWaiters.delete(msg.id)
+        w?.(msg.sent > 0 ? { sent: msg.sent, kbps: msg.kbps } : null)
+        return
+      }
       case 'resetGamepad':
         this.log('host asked to reconnect gamepads')
         this.resetGamepad()
@@ -555,6 +624,8 @@ export class ClientController extends EventEmitter {
     this.clearTimer('pair')
     this.set({ phase: 'launching' })
     this.launchAddress = address
+    // UDP до хоста нужен и без автоподбора: по пингам видно, забит ли канал.
+    void this.ensureProbe(attempt, address)
     if (this.d.settings.get().stream.autoQuality && !this.measured) {
       this.measured = true
       void this.measure(attempt).then(() => {
@@ -591,21 +662,35 @@ export class ClientController extends EventEmitter {
       this.streamProc.kill()
       this.streamProc = null
     }
-    const stream = this.effectiveStream(address)
-    const startedAt = Date.now()
     const native = this.d.nativeResolution?.()
+    const chosen = this.effectiveStream(address)
+    const params = streamParams(chosen, native, this.state.policy)
+    // Кодек «авто»: HEVC или AV1, если обе видеокарты умеют их аппаратно (AV1 — когда канал ограничивает качество).
+    const constrained = !!params.bitrateKbps && !!params.size && params.bitrateKbps < 0.85 * naturalBitrate(params.size[0], params.size[1], params.fps)
+    const codec = chooseCodec({
+      setting: chosen.codec,
+      host: this.state.policy?.encoder,
+      client: this.decoderCaps,
+      constrained,
+      priority: chosen.priority,
+      yuv444: chosen.yuv444
+    })
+    const stream = codec === chosen.codec ? chosen : { ...chosen, codec }
+    if (codec !== chosen.codec) this.log(`codec: ${codec}${constrained ? ' (bitrate limited by the channel)' : ''}`)
+    const startedAt = Date.now()
     const proc = this.d.moonlight.stream(address, stream, native, this.state.policy)
     this.streamProc = proc
-    const params = streamParams(stream, native, this.state.policy)
     this.set({
       active: {
         width: params.size?.[0] ?? 0,
         height: params.size?.[1] ?? 0,
         fps: params.fps,
         bitrateKbps: params.bitrateKbps ?? 0,
-        auto: !!this.auto
+        auto: !!this.auto,
+        codec: codec !== 'auto' ? codec : undefined
       }
     })
+    this.startNetWatch(attempt)
     void this.d
       .wifi?.()
       .then((wifi) => attempt === this.attempt && this.state.wifi !== wifi && this.set({ wifi }))
@@ -790,7 +875,10 @@ export class ClientController extends EventEmitter {
     this.poorTimer = setTimeout(() => apply(false), this.d.poorNetworkClearMs ?? 6000)
   }
 
-  /** Автоподбор: если связь остаётся плохой, снижаем качество на ступень (не чаще раза в минуту). */
+  /**
+   * Автоподбор: Moonlight 15 с подряд теряет кадры — снижаем качество на ступень (не чаще раза в минуту).
+   * Короткий всплеск потерь лучше переждать: перезапуск трансляции — это несколько секунд чёрного экрана.
+   */
   private scheduleAutoLower(): void {
     if (this.autoLowerTimer || !this.d.settings.get().stream.autoQuality) return
     const attempt = this.attempt
@@ -798,15 +886,31 @@ export class ClientController extends EventEmitter {
       this.autoLowerTimer = null
       if (attempt !== this.attempt || !this.state.poorNetwork || this.state.phase !== 'streaming') return
       if (Date.now() - this.lastAutoLower < 60_000) return this.scheduleAutoLower()
-      const base = this.d.settings.get().stream
-      const next = lowerProfile(this.auto ?? { resolution: base.resolution, fps: base.fps, bitrateKbps: this.state.active?.bitrateKbps ?? base.bitrateKbps }, base)
-      if (!next) return
-      this.auto = next
-      this.lastAutoLower = Date.now()
-      this.log(`auto quality: lowering to ${next.resolution} ${next.fps}fps ${next.bitrateKbps}kbps`)
-      this.set({ autoLowered: true })
-      this.restartStream()
+      this.lowerQuality('poor connection', 0.7, true)
     }, this.d.autoLowerAfterMs ?? 15_000)
+  }
+
+  /**
+   * Снизить качество на ступень и перезапустить трансляцию. remember — запомнить, что канал до хоста упирался:
+   * только при потерях у Moonlight. Очередь бывает и не из-за канала (хост загружен игрой), и ошибка в памяти
+   * занижала бы качество следующих подключений.
+   */
+  private lowerQuality(reason: string, factor: number, remember: boolean): boolean {
+    const base = this.d.settings.get().stream
+    const cur = this.auto ?? { resolution: base.resolution, fps: base.fps, bitrateKbps: this.state.active?.bitrateKbps ?? base.bitrateKbps }
+    const next = lowerProfile(cur, base, factor)
+    if (!next) return false
+    // Замера не было (не удался): вернуться потом можно хотя бы к тому, с чем начали.
+    if (!this.measuredAuto) this.measuredAuto = cur
+    this.auto = next
+    this.lastAutoLower = Date.now()
+    this.log(`auto quality (${reason}): lowering to ${next.resolution} ${next.fps}fps ${next.bitrateKbps}kbps`)
+    if (remember && this.launchAddress) this.d.settings.rememberNet(this.launchAddress, { kbps: next.bitrateKbps, at: Date.now(), limited: true })
+    this.cleanSince = 0
+    this.cleanSaved = false
+    this.set({ autoLowered: true })
+    this.restartStream()
+    return true
   }
 
   /**
@@ -814,13 +918,14 @@ export class ClientController extends EventEmitter {
    * возвращаем замеренное качество (не чаще чем через 10 минут после снижения).
    */
   private scheduleAutoRaise(): void {
-    if (this.autoRaiseTimer || !this.state.autoLowered || !this.measuredAuto) return
+    if (this.autoRaiseTimer || !(this.state.autoLowered || this.memoryLimited) || !this.measuredAuto) return
     const attempt = this.attempt
     this.autoRaiseTimer = setTimeout(() => {
       this.autoRaiseTimer = null
-      if (attempt !== this.attempt || this.state.poorNetwork || this.state.phase !== 'streaming' || !this.measuredAuto) return
+      if (attempt !== this.attempt || this.state.poorNetwork || this.state.congested || this.state.phase !== 'streaming' || !this.measuredAuto) return
       if (Date.now() - this.lastAutoLower < 10 * 60_000) return this.scheduleAutoRaise()
       this.auto = this.measuredAuto
+      this.memoryLimited = false
       this.log('auto quality: connection is stable again, back to the measured quality')
       this.set({ autoLowered: false })
       this.restartStream()
@@ -834,22 +939,198 @@ export class ClientController extends EventEmitter {
     return { ...s.stream, ...(s.hostQuality[address] ?? {}) }
   }
 
-  /** Замер скорости канала от хоста: хост присылает несколько мегабайт, считаем время прихода. */
-  private measure(attempt: number): Promise<void> {
+  /**
+   * Замер канала перед первым запуском: по UDP ступенями, как идёт само видео (новый хост), иначе по TCP.
+   * Стартовый битрейт — меньшее из замера и памяти о прошлых подключениях к этому хосту
+   * (после проблем поднимаемся осторожно, на 15% за подключение).
+   */
+  private async measure(attempt: number): Promise<void> {
     this.set({ measuring: true })
-    return new Promise<void>((resolve) => {
+    const address = this.launchAddress
+    const s = this.d.settings.get().stream
+    const cap = this.state.policy?.maxBitrateKbps ?? 0
+    const fec = this.state.policy?.fecPercent ?? 20
+    let probeKbps: number | undefined
+    let speedMbps: number | undefined
+    const udp = address && this.features.includes('udpProbe') ? await this.measureUdp(attempt, address, cap, fec).catch((e) => (this.log('udp probe failed', e), null)) : null
+    if (attempt !== this.attempt) return
+    if (udp) {
+      const fromChannel = bitrateForCapacity(udp.capacityKbps, fec, s.priority)
+      probeKbps = cap > 0 ? Math.min(fromChannel, cap) : fromChannel
+      speedMbps = udp.capacityKbps / 1000
+      this.send({ t: 'probeResult', capacityKbps: udp.capacityKbps, saturated: udp.saturated })
+      this.set({ probe: { kind: 'udp', saturated: udp.saturated, baseLossPct: udp.baseLossPct } })
+      const steps = udp.steps.map((x) => `${Math.round(x.rateKbps / 100) / 10}:${Math.round(x.loss * 100)}%/${x.queueMs}ms`).join(' ')
+      this.log(`udp probe: ${speedMbps.toFixed(1)} Mbit/s${udp.saturated ? '' : ' or more'} (base loss ${udp.baseLossPct}%; ${steps}) -> ${probeKbps} kbps`)
+    } else {
+      const mbps = await this.measureTcp(attempt)
+      if (attempt !== this.attempt) return
+      if (mbps && mbps > 0) {
+        probeKbps = autoProfile(mbps, s, cap).bitrateKbps
+        speedMbps = mbps
+        this.set({ probe: { kind: 'tcp', saturated: false } })
+        this.log(`speed test (tcp): ${mbps.toFixed(1)} Mbit/s -> ${probeKbps} kbps`)
+      }
+    }
+    this.probeKbps = probeKbps
+    const mem = address ? this.d.settings.get().netMemory[address] : undefined
+    const start = startBitrate(probeKbps, mem, Date.now())
+    if (start !== undefined) {
+      this.auto = profileForBitrate(cap > 0 ? Math.min(start, cap) : start, s)
+      // Подъём в этой же игре — до замера, а не до памяти: память только задаёт осторожный старт.
+      this.measuredAuto = probeKbps !== undefined ? profileForBitrate(cap > 0 ? Math.min(probeKbps, cap) : probeKbps, s) : this.auto
+      this.memoryLimited = probeKbps !== undefined && start < probeKbps
+      if (probeKbps === undefined || start < probeKbps) this.log(`auto quality: last time this host needed ${mem?.kbps} kbps, starting at ${this.auto.bitrateKbps}`)
+      this.log(`auto quality: ${this.auto.resolution} ${this.auto.fps}fps ${this.auto.bitrateKbps}kbps`)
+    }
+    this.set({ measuring: false, speedMbps: speedMbps ? Math.round(speedMbps) : undefined, relaySuspect: relaySuspect(this.rttSamples, speedMbps) })
+  }
+
+  /** UDP-сокет до хоста (один на подключение): токен по сигнальному соединению, затем регистрация по UDP. */
+  private ensureProbe(attempt: number, address: string): Promise<ProbeClient | null> {
+    if (!this.features.includes('udpProbe')) return Promise.resolve(null)
+    if (this.probeClient) return Promise.resolve(this.probeClient)
+    if (this.probeOpening) return this.probeOpening
+    const opening = new Promise<ProbeClient | null>((resolve) => {
+      const timer = setTimeout(() => {
+        this.tokenWaiter = null
+        resolve(null)
+      }, 4000)
+      this.tokenWaiter = (token, port) => {
+        clearTimeout(timer)
+        this.tokenWaiter = null
+        if (!token || attempt !== this.attempt) return resolve(null)
+        const pc = new ProbeClient(address, port, token)
+        void pc.start().then((ok) => {
+          if (!ok || attempt !== this.attempt || this.probeOpening !== opening) {
+            if (!ok) this.log('udp to the host does not get through (probe registration timed out)')
+            pc.close()
+            return resolve(null)
+          }
+          this.probeClient = pc
+          this.watch.reset()
+          pc.startPings(this.d.pingIntervalMs ?? 200, (rtt) => this.watch.add(performance.now(), rtt))
+          resolve(pc)
+        })
+      }
+      this.send({ t: 'probeOpen' })
+    }).finally(() => {
+      if (this.probeOpening === opening) this.probeOpening = null
+    })
+    this.probeOpening = opening
+    return opening
+  }
+
+  private closeProbe(): void {
+    this.probeOpening = null
+    this.tokenWaiter = null
+    for (const w of this.stepWaiters.values()) w(null)
+    this.stepWaiters.clear()
+    this.probeClient?.close()
+    this.probeClient = null
+  }
+
+  private async measureUdp(attempt: number, address: string, cap: number, fec: number): Promise<ProbeOutcome | null> {
+    const pc = await this.ensureProbe(attempt, address)
+    if (!pc || attempt !== this.attempt) return null
+    const ask: AskStep = (id, kbps, ms) =>
+      new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          this.stepWaiters.delete(id)
+          resolve(null)
+        }, ms + 4000)
+        this.stepWaiters.set(id, (r) => {
+          clearTimeout(timer)
+          resolve(r)
+        })
+        this.send({ t: 'probeStep', id, kbps, ms })
+      })
+    return measureChannel(pc, ask, probeTarget(cap, fec), () => attempt !== this.attempt || this.probeClient !== pc)
+  }
+
+  /**
+   * Раз в секунду во время игры: забит ли канал (по UDP-пингам) и не пора ли запомнить битрейт удачным.
+   * Перегрузка видна раньше потерь у Moonlight — снижаем качество, пока игра ещё не начала дёргаться.
+   */
+  private startNetWatch(attempt: number): void {
+    if (this.netTimer) return
+    this.cleanSince = 0
+    this.cleanSaved = false
+    this.netTimer = setInterval(() => {
+      if (attempt !== this.attempt) return
+      const now = performance.now()
+      const playing = this.state.phase === 'streaming' && !this.state.restarting && !this.state.reconnecting && !this.resuming && !!this.streamProc
+      let congested = false
+      let queueMs: number | undefined
+      if (this.probeClient) {
+        queueMs = Math.round(this.watch.current(now).queueMs)
+        if (playing) congested = this.watch.congested(now)
+        else this.watch.clearHold()
+      }
+      if (queueMs !== this.state.queueMs || congested !== !!this.state.congested) this.set({ queueMs, congested })
+      if (congested !== this.congestionSent) {
+        this.congestionSent = congested
+        this.send({ t: 'netCongestion', on: congested })
+        this.log(congested ? `network congested (queue ${queueMs} ms)` : 'network congestion cleared')
+      }
+      if (!playing) return
+      if (congested) {
+        if (this.autoRaiseTimer) clearTimeout(this.autoRaiseTimer)
+        this.autoRaiseTimer = null
+        this.lowerForCongestion()
+      } else if (!this.state.poorNetwork) {
+        this.scheduleAutoRaise()
+      }
+      this.trackClean(congested || !!this.state.poorNetwork)
+    }, 1000)
+  }
+
+  /**
+   * Канал забит 8 с подряд: снижаем битрейт (×0,75) — не больше одного раза за подключение и не раньше чем
+   * через минуту после прошлого снижения. Очередь бывает и не из-за нашего потока (кто-то качает в той же сети,
+   * ретранслятор, Wi-Fi), и снижать её раз за разом — значит перезапускать игру без пользы. Дальше — только
+   * по потерям у Moonlight.
+   */
+  private lowerForCongestion(): void {
+    if (!this.d.settings.get().stream.autoQuality) return
+    if (Date.now() - this.lastAutoLower < (this.d.congestionLowerGapMs ?? 60_000)) return
+    if (this.delayLowers >= 1) return
+    if (this.lowerQuality('congestion', 0.75, false)) this.delayLowers++
+  }
+
+  /**
+   * Память о канале до хоста: если связь несколько минут шла без проблем на битрейте выше запомненного
+   * «предела», предел поднимается. Когда запуск уже не ограничен памятью (битрейт не ниже замера), предела больше нет.
+   */
+  private trackClean(trouble: boolean): void {
+    const now = Date.now()
+    if (trouble) {
+      this.cleanSince = 0
+      this.cleanSaved = false
+      return
+    }
+    if (!this.cleanSince) this.cleanSince = now
+    if (this.cleanSaved || now - this.cleanSince < (this.d.netCleanMs ?? 180_000)) return
+    this.cleanSaved = true
+    const address = this.launchAddress
+    const kbps = this.state.active?.bitrateKbps ?? 0
+    if (!address || !kbps || !this.state.active?.auto) return
+    const mem = this.d.settings.get().netMemory[address]
+    if (!mem?.limited || now - mem.at > NET_MEMORY_TTL_MS) return
+    const free = this.probeKbps !== undefined && kbps >= this.probeKbps
+    if (kbps <= mem.kbps && !free) return
+    this.log(`network memory: ${kbps} kbps went fine${free ? ' (no longer limited)' : ''}`)
+    // Время записи не обновляем: память о проблемах истекает через 14 дней после них, а не после удачной игры.
+    this.d.settings.rememberNet(address, { kbps: Math.max(kbps, mem.kbps), at: mem.at, limited: !free })
+  }
+
+  /** Замер по TCP (старый хост без UDP-замера): хост присылает несколько мегабайт, считаем время прихода. */
+  private measureTcp(attempt: number): Promise<number | undefined> {
+    return new Promise<number | undefined>((resolve) => {
       const finish = (mbps?: number): void => {
         clearTimeout(timer)
         this.speed = null
-        if (attempt !== this.attempt) return resolve()
-        const s = this.d.settings.get().stream
-        if (mbps && mbps > 0) {
-          this.auto = autoProfile(mbps, s, this.state.policy?.maxBitrateKbps ?? 0)
-          this.measuredAuto = this.auto
-          this.log(`speed test: ${mbps.toFixed(1)} Mbit/s -> ${this.auto.resolution} ${this.auto.fps}fps ${this.auto.bitrateKbps}kbps`)
-        }
-        this.set({ measuring: false, speedMbps: mbps ? Math.round(mbps) : undefined, relaySuspect: relaySuspect(this.rttSamples, mbps) })
-        resolve()
+        resolve(attempt === this.attempt ? mbps : undefined)
       }
       // Старый хост не отвечает на замер: через несколько секунд стартуем с обычными настройками.
       const timer = setTimeout(() => finish(this.speedResult()), this.d.speedTestTimeoutMs ?? 6000)
@@ -1000,6 +1281,11 @@ export class ClientController extends EventEmitter {
     this.inputRequestTimer = null
     this.speed?.done?.()
     this.speed = null
+    this.closeProbe()
+    if (this.netTimer) clearInterval(this.netTimer)
+    this.netTimer = null
+    this.congestionSent = false
+    this.watch.reset()
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.pingTimer = null
     for (const name of Object.keys(this.timers) as TimerName[]) this.clearTimer(name)

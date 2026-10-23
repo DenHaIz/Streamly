@@ -1,4 +1,4 @@
-import { createSocket, type Socket } from 'node:dgram'
+import { createSocket, type RemoteInfo, type Socket } from 'node:dgram'
 import {
   DISCOVERY_MAGIC,
   DISCOVERY_PORT,
@@ -8,6 +8,7 @@ import {
   type DiscoveryReply
 } from '@shared/protocol'
 import { run } from '../../elevate'
+import { isProbePacket } from './probe'
 import { isRadminIp, RADMIN_BROADCAST } from './radmin'
 
 /** Можно ли принимать запросы с этого адреса: только сеть Radmin и локальная машина. */
@@ -23,15 +24,36 @@ export class DiscoveryResponder {
   constructor(
     private readonly info: () => Omit<DiscoveryReply, 'magic' | 'port'>,
     private readonly port = DISCOVERY_PORT,
-    private readonly extraAllowed: string[] = []
+    private readonly extraAllowed: string[] = [],
+    /** Пакеты замера канала (тот же порт: правило файрвола уже есть). */
+    private readonly onProbe?: (msg: Buffer, rinfo: RemoteInfo) => void
   ) {}
+
+  /** Порт, на котором слушает ответчик (0 в настройке — выбранный системой). */
+  get boundPort(): number | undefined {
+    try {
+      return this.socket?.address().port
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Отправить пакет с порта поиска (замер канала). */
+  send(buf: Buffer, port: number, address: string): void {
+    try {
+      this.socket?.send(buf, port, address)
+    } catch {
+      /* сокет закрыт */
+    }
+  }
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       const s = createSocket({ type: 'udp4', reuseAddr: true })
       s.on('message', (msg, rinfo) => {
-        if (msg.length > 64 || msg.toString() !== DISCOVERY_MAGIC) return
         if (!isAllowedPeer(rinfo.address, this.extraAllowed)) return
+        if (this.onProbe && isProbePacket(msg)) return this.onProbe(msg, rinfo)
+        if (msg.length > 64 || msg.toString() !== DISCOVERY_MAGIC) return
         const reply: DiscoveryReply = { magic: DISCOVERY_REPLY, port: SIGNALING_PORT, ...this.info() }
         s.send(JSON.stringify(reply), rinfo.port, rinfo.address)
       })
